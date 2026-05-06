@@ -1,6 +1,5 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { Plus } from "lucide-react";
 import type { DisplayResource, OperationStatus } from "./mock-data";
 
 type PageHeaderProps = {
@@ -19,7 +18,7 @@ export function PageHeader({ title, description, actionHref, actionLabel }: Page
       </div>
       {actionHref && actionLabel ? (
         <Link href={actionHref} className="inline-flex items-center gap-2 rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-700">
-          <Plus className="h-4 w-4" aria-hidden="true" />
+          <span className="text-base leading-none" aria-hidden="true">+</span>
           {actionLabel}
         </Link>
       ) : null}
