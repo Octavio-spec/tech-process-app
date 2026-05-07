@@ -9,23 +9,55 @@ import {
   loadPartsFromStorage,
   loadProjectsFromStorage,
   machineName,
+  savePartsToStorage,
   type ProcessOperation,
   type ProcessPart,
   type ProcessProject,
 } from "../../process-model";
+import { PartForm } from "../../project-part-forms";
 import { InfoCard, PageHeader, StatCard, StatusBadge } from "../../ui";
 
 export function PartDetailClient({ partId, projectId, initialPart }: { partId: string; projectId?: string; initialPart?: ProcessPart }) {
   const [part, setPart] = useState<ProcessPart | undefined>(initialPart);
   const [project, setProject] = useState<ProcessProject | undefined>();
+  const [parts, setParts] = useState<ProcessPart[]>([]);
+  const [projects, setProjects] = useState<ProcessProject[]>([]);
   const [operations, setOperations] = useState<ProcessOperation[]>([]);
+  const [isEditOpen, setIsEditOpen] = useState(false);
+  const [message, setMessage] = useState("");
 
   useEffect(() => {
-    const nextPart = loadPartsFromStorage().find((item) => item.id === partId) ?? initialPart;
+    const loadedParts = loadPartsFromStorage();
+    const loadedProjects = loadProjectsFromStorage();
+    const nextPart = loadedParts.find((item) => item.id === partId) ?? initialPart;
+    setParts(loadedParts);
+    setProjects(loadedProjects);
     setPart(nextPart);
-    setProject(loadProjectsFromStorage().find((item) => item.id === (projectId ?? nextPart?.projectId)));
+    setProject(loadedProjects.find((item) => item.id === (projectId ?? nextPart?.projectId)));
     setOperations(loadOperationsFromStorage(partId));
   }, [initialPart, partId, projectId]);
+
+  function editPart(nextPart: ProcessPart) {
+    const nextParts = parts.map((item) => item.id === nextPart.id ? nextPart : item);
+    setParts(nextParts);
+    setPart(nextPart);
+    setProject(projects.find((project) => project.id === nextPart.projectId));
+    savePartsToStorage(nextParts);
+    setIsEditOpen(false);
+    setMessage("Деталь сохранена");
+  }
+
+  function deletePart() {
+    if (!part || !window.confirm("Удалить деталь? Она будет скрыта из активного списка, но данные можно будет восстановить.")) return;
+    const date = new Date().toLocaleDateString("ru-RU");
+    editPart({ ...part, isDeleted: true, deletedAt: date, updatedAt: date });
+  }
+
+  function restorePart() {
+    if (!part) return;
+    const date = new Date().toLocaleDateString("ru-RU");
+    editPart({ ...part, isDeleted: false, deletedAt: null, updatedAt: date });
+  }
 
   if (!part) {
     return <div className="rounded-lg border border-slate-200 bg-white p-6 text-sm text-slate-600 shadow-sm">Деталь не найдена.</div>;
@@ -36,9 +68,26 @@ export function PartDetailClient({ partId, projectId, initialPart }: { partId: s
       <PageHeader
         title={`${part.code} · ${part.name}`}
         description={part.description || "Карточка детали с маршрутом обработки."}
-        actionHref={`/projects/${part.projectId}/parts/${part.id}/process`}
-        actionLabel="Редактировать техпроцесс"
       />
+
+      <div className="flex flex-wrap items-center gap-2">
+        <button type="button" onClick={() => setIsEditOpen(true)} className="rounded-md border border-blue-200 bg-white px-4 py-2 text-sm font-semibold text-blue-700">Редактировать деталь</button>
+        <Link href={`/parts/${part.id}/process`} className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white">Редактировать техпроцесс</Link>
+        {!part.isDeleted ? <button type="button" onClick={deletePart} className="rounded-md border border-rose-200 px-4 py-2 text-sm font-semibold text-rose-700">Удалить деталь</button> : null}
+        {part.isDeleted ? <button type="button" onClick={restorePart} className="rounded-md border border-emerald-200 px-4 py-2 text-sm font-semibold text-emerald-700">Восстановить деталь</button> : null}
+      </div>
+
+      {message ? <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700">{message}</div> : null}
+      {isEditOpen ? (
+        <PartForm
+          mode="edit"
+          part={part}
+          parts={parts}
+          projects={projects.filter((project) => !project.isDeleted)}
+          onSubmit={editPart}
+          onCancel={() => setIsEditOpen(false)}
+        />
+      ) : null}
 
       <nav className="flex flex-wrap gap-2 text-sm text-slate-600">
         <Link href="/projects" className="font-semibold text-blue-700">Проекты</Link>
@@ -70,7 +119,7 @@ export function PartDetailClient({ partId, projectId, initialPart }: { partId: s
             const hasManual = hasManualResources(operation);
 
             return (
-              <Link key={operation.id} href={`/projects/${part.projectId}/parts/${part.id}/process`} className="min-w-64 rounded-lg border border-blue-200 bg-blue-50 p-4">
+              <Link key={operation.id} href={`/parts/${part.id}/process`} className="min-w-64 rounded-lg border border-blue-200 bg-blue-50 p-4">
                 <div className="text-sm font-semibold text-blue-700">Операция {operation.operationNo}</div>
                 <div className="mt-1 font-semibold text-slate-950">{operation.name}</div>
                 <div className="mt-3 space-y-1 text-sm text-slate-700">

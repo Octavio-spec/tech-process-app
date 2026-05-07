@@ -1,29 +1,34 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   loadPartsFromStorage,
   loadProjectsFromStorage,
   savePartsToStorage,
   saveProjectsToStorage,
-  type OperationStatus,
   type ProcessPart,
   type ProcessProject,
 } from "../../process-model";
+import { PartForm, ProjectForm } from "../../project-part-forms";
 import { DataTable, PageHeader, StatCard, StatusBadge } from "../../ui";
 
 type DetailFilter = "active" | "archive" | "deleted";
-const statuses: OperationStatus[] = ["Черновик", "В работе", "Требует уточнения", "Готово", "Архив"];
 
 export function ProjectDetailClient({ projectId }: { projectId: string }) {
   const [project, setProject] = useState<ProcessProject>();
+  const [projects, setProjects] = useState<ProcessProject[]>([]);
   const [parts, setParts] = useState<ProcessPart[]>([]);
   const [filter, setFilter] = useState<DetailFilter>("active");
   const [isFormOpen, setIsFormOpen] = useState(false);
+  const [isProjectFormOpen, setIsProjectFormOpen] = useState(false);
+  const [editingPartId, setEditingPartId] = useState<string>();
+  const [message, setMessage] = useState("");
 
   useEffect(() => {
-    setProject(loadProjectsFromStorage().find((item) => item.id === projectId));
+    const loadedProjects = loadProjectsFromStorage();
+    setProjects(loadedProjects);
+    setProject(loadedProjects.find((item) => item.id === projectId));
     setParts(loadPartsFromStorage());
   }, [projectId]);
 
@@ -42,6 +47,23 @@ export function ProjectDetailClient({ projectId }: { projectId: string }) {
   function addPart(part: ProcessPart) {
     persistParts([...parts, part]);
     setIsFormOpen(false);
+    setMessage("Деталь сохранена");
+  }
+
+  function editPart(part: ProcessPart) {
+    const nextParts = parts.map((item) => item.id === part.id ? part : item);
+    persistParts(nextParts);
+    setEditingPartId(undefined);
+    setMessage("Деталь сохранена");
+  }
+
+  function editProject(project: ProcessProject) {
+    const nextProjects = projects.map((item) => item.id === project.id ? project : item);
+    setProjects(nextProjects);
+    setProject(project);
+    saveProjectsToStorage(nextProjects);
+    setIsProjectFormOpen(false);
+    setMessage("Проект сохранён");
   }
 
   function archivePart(partId: string) {
@@ -89,6 +111,7 @@ export function ProjectDetailClient({ projectId }: { projectId: string }) {
       </section>
 
       <div className="flex flex-wrap items-center gap-2">
+        <button type="button" onClick={() => setIsProjectFormOpen(true)} className="rounded-md border border-blue-200 bg-white px-4 py-2 text-sm font-semibold text-blue-700">Редактировать проект</button>
         <button type="button" onClick={() => setIsFormOpen(true)} className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white">+ Добавить деталь</button>
         {[
           ["active", "Активные детали"],
@@ -99,20 +122,34 @@ export function ProjectDetailClient({ projectId }: { projectId: string }) {
         ))}
       </div>
 
-      {isFormOpen ? <PartCreateForm projectId={project.id} onCreate={addPart} onCancel={() => setIsFormOpen(false)} /> : null}
+      {message ? <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700">{message}</div> : null}
+      {isProjectFormOpen ? <ProjectForm mode="edit" project={project} projects={projects} onSubmit={editProject} onCancel={() => setIsProjectFormOpen(false)} /> : null}
+      {isFormOpen ? <PartForm mode="create" parts={parts} projects={projects.filter((project) => !project.isDeleted)} defaultProjectId={project.id} onSubmit={addPart} onCancel={() => setIsFormOpen(false)} /> : null}
+      {editingPartId ? (
+        <PartForm
+          mode="edit"
+          part={parts.find((part) => part.id === editingPartId)}
+          parts={parts}
+          projects={projects.filter((project) => !project.isDeleted)}
+          defaultProjectId={project.id}
+          onSubmit={editPart}
+          onCancel={() => setEditingPartId(undefined)}
+        />
+      ) : null}
 
       <DataTable
         title="Детали проекта"
         columns={["Код", "Наименование", "Чертёж", "Статус", "Дата изменения", "Действия"]}
         rows={visibleParts.map((part) => [
-          <Link key={`${part.id}-code`} href={`/projects/${project.id}/parts/${part.id}`} className="font-semibold text-blue-700 hover:text-blue-800">{part.code}</Link>,
+          <Link key={`${part.id}-code`} href={`/parts/${part.id}`} className="font-semibold text-blue-700 hover:text-blue-800">{part.code}</Link>,
           part.name,
           part.drawingNumber ?? "",
           <StatusBadge key={`${part.id}-status`} status={part.status} />,
           part.updatedAt,
           <div key={`${part.id}-actions`} className="flex flex-wrap gap-2">
-            <Link href={`/projects/${project.id}/parts/${part.id}`} className="text-sm font-semibold text-blue-700">Открыть</Link>
-            <Link href={`/projects/${project.id}/parts/${part.id}/process`} className="text-sm font-semibold text-blue-700">Редактировать</Link>
+            <Link href={`/parts/${part.id}`} className="text-sm font-semibold text-blue-700">Открыть</Link>
+            <button type="button" onClick={() => setEditingPartId(part.id)} className="text-sm font-semibold text-blue-700">Редактировать</button>
+            <Link href={`/parts/${part.id}/process`} className="text-sm font-semibold text-blue-700">Техпроцесс</Link>
             {filter !== "deleted" ? <button type="button" onClick={() => archivePart(part.id)} className="text-sm font-semibold text-slate-600">Архивировать</button> : null}
             {filter !== "deleted" ? <button type="button" onClick={() => deletePart(part.id)} className="text-sm font-semibold text-rose-700">Удалить</button> : null}
             {filter === "deleted" ? <button type="button" onClick={() => restorePart(part.id)} className="text-sm font-semibold text-emerald-700">Восстановить</button> : null}
@@ -123,62 +160,6 @@ export function ProjectDetailClient({ projectId }: { projectId: string }) {
   );
 }
 
-function PartCreateForm({ projectId, onCreate, onCancel }: { projectId: string; onCreate: (part: ProcessPart) => void; onCancel: () => void }) {
-  const [code, setCode] = useState("");
-  const [name, setName] = useState("");
-  const [drawingNumber, setDrawingNumber] = useState("");
-  const [description, setDescription] = useState("");
-  const [status, setStatus] = useState<OperationStatus>("Черновик");
-
-  function submit() {
-    const id = `part-${Date.now()}`;
-    const date = nowDate();
-    onCreate({
-      id,
-      projectId,
-      code: code || "Новая деталь",
-      name: name || "Без наименования",
-      drawingNumber,
-      description,
-      status,
-      isDeleted: false,
-      deletedAt: null,
-      createdAt: date,
-      routeId: `local-route-${id}`,
-      updatedAt: date,
-    });
-  }
-
-  return (
-    <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-      <h2 className="text-lg font-semibold text-slate-950">Новая деталь проекта</h2>
-      <div className="mt-4 grid gap-4 md:grid-cols-2">
-        <Field label="Код детали"><Input value={code} onChange={setCode} /></Field>
-        <Field label="Наименование"><Input value={name} onChange={setName} /></Field>
-        <Field label="Номер чертежа"><Input value={drawingNumber} onChange={setDrawingNumber} /></Field>
-        <Field label="Статус">
-          <select value={status} onChange={(event) => setStatus(event.target.value as OperationStatus)} className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm">
-            {statuses.map((item) => <option key={item} value={item}>{item}</option>)}
-          </select>
-        </Field>
-        <Field label="Описание" wide><textarea value={description} onChange={(event) => setDescription(event.target.value)} rows={3} className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm" /></Field>
-      </div>
-      <div className="mt-4 flex gap-2">
-        <button type="button" onClick={submit} className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white">Сохранить деталь</button>
-        <button type="button" onClick={onCancel} className="rounded-md border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700">Отмена</button>
-      </div>
-    </section>
-  );
-}
-
 function nowDate() {
   return new Date().toLocaleDateString("ru-RU");
-}
-
-function Field({ label, wide, children }: { label: string; wide?: boolean; children: ReactNode }) {
-  return <label className={wide ? "md:col-span-2" : ""}><div className="mb-1 text-sm font-semibold text-slate-700">{label}</div>{children}</label>;
-}
-
-function Input({ value, onChange }: { value: string; onChange: (value: string) => void }) {
-  return <input value={value} onChange={(event) => onChange(event.target.value)} className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm" />;
 }

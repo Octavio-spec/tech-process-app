@@ -43,6 +43,7 @@ export function ProcessEditor({ partId, projectId, initialPart }: ProcessEditorP
   const [selectedOperationId, setSelectedOperationId] = useState<string>();
   const [selectedSetupId, setSelectedSetupId] = useState<string>();
   const [savedMessage, setSavedMessage] = useState("");
+  const [isDirty, setIsDirty] = useState(false);
 
   useEffect(() => {
     const nextPart = loadPartsFromStorage().find((item) => item.id === partId) ?? initialPart;
@@ -70,6 +71,7 @@ export function ProcessEditor({ partId, projectId, initialPart }: ProcessEditorP
     if (!selectedOperation) return;
     setOperations((current) => current.map((operation) => (operation.id === selectedOperation.id ? { ...operation, ...patch } : operation)));
     setSavedMessage("");
+    setIsDirty(true);
   }
 
   function updateSetup(setupId: string, patch: Partial<OperationSetup>) {
@@ -86,6 +88,7 @@ export function ProcessEditor({ partId, projectId, initialPart }: ProcessEditorP
     setSelectedOperationId(operation.id);
     setSelectedSetupId(operation.setups[0].id);
     setSavedMessage("");
+    setIsDirty(true);
   }
 
   function deleteOperation() {
@@ -95,6 +98,7 @@ export function ProcessEditor({ partId, projectId, initialPart }: ProcessEditorP
     setSelectedOperationId(next[0]?.id);
     setSelectedSetupId(next[0]?.setups[0]?.id);
     setSavedMessage("");
+    setIsDirty(true);
   }
 
   function duplicateOperation() {
@@ -112,6 +116,7 @@ export function ProcessEditor({ partId, projectId, initialPart }: ProcessEditorP
     setSelectedOperationId(operation.id);
     setSelectedSetupId(operation.setups[0]?.id);
     setSavedMessage("");
+    setIsDirty(true);
   }
 
   function addSetup() {
@@ -140,6 +145,7 @@ export function ProcessEditor({ partId, projectId, initialPart }: ProcessEditorP
   function saveProcess() {
     saveOperationsToStorage(partId, operations);
     setSavedMessage("Техпроцесс сохранён");
+    setIsDirty(false);
   }
 
   return (
@@ -152,12 +158,12 @@ export function ProcessEditor({ partId, projectId, initialPart }: ProcessEditorP
         <span>→</span>
         <a href={`/projects/${projectId ?? part.projectId}`} className="font-semibold text-blue-700">{project?.name ?? "Проект"}</a>
         <span>→</span>
-        <a href={`/projects/${projectId ?? part.projectId}/parts/${part.id}`} className="font-semibold text-blue-700">{part.name}</a>
+        <a href={`/parts/${part.id}`} className="font-semibold text-blue-700">{part.name}</a>
         <span>→</span>
         <span>Техпроцесс</span>
       </nav>
       <VisualRoute operations={operations} />
-      <div className="grid min-h-[calc(100vh-260px)] gap-4 xl:grid-cols-[300px_minmax(0,1fr)_280px]">
+      <div className="grid min-h-[calc(100vh-260px)] gap-4 xl:grid-cols-[300px_minmax(0,1fr)]">
         <OperationList
           part={part}
           operations={operations}
@@ -173,9 +179,14 @@ export function ProcessEditor({ partId, projectId, initialPart }: ProcessEditorP
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-4">
             <div>
               <h2 className="text-lg font-semibold text-slate-950">Операция</h2>
-              <p className="mt-1 text-sm text-slate-600">Описание операции и её установов.</p>
+              <p className="mt-1 text-sm text-slate-600">
+                {selectedOperation ? `Операция ${selectedOperation.operationNo} — ${selectedOperation.name}` : "Описание операции и её установов."}
+              </p>
             </div>
             <div className="flex flex-wrap gap-2">
+              {isDirty ? <span className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700">Есть несохранённые изменения</span> : null}
+              {savedMessage ? <span className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700">{savedMessage}</span> : null}
+              <button type="button" onClick={saveProcess} className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white">Сохранить техпроцесс</button>
               <button type="button" onClick={duplicateOperation} className="rounded-md border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700">Дублировать операцию</button>
               <button type="button" onClick={deleteOperation} className="rounded-md border border-rose-200 px-3 py-2 text-sm font-semibold text-rose-700">Удалить операцию</button>
             </div>
@@ -202,20 +213,6 @@ export function ProcessEditor({ partId, projectId, initialPart }: ProcessEditorP
             <EmptyState text="Добавьте первую операцию." />
           )}
         </main>
-
-        <aside className="space-y-4 rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-4">
-            <div>
-              <h2 className="text-lg font-semibold text-slate-950">Сохранение</h2>
-              <p className="mt-1 text-sm text-slate-600">Изменения пишутся в localStorage.</p>
-            </div>
-            <button type="button" onClick={saveProcess} className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white">Сохранить техпроцесс</button>
-          </div>
-          {savedMessage ? <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700">{savedMessage}</div> : null}
-          <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
-            Операции, установы и инструментальные позиции редактируются в центральной рабочей области.
-          </div>
-        </aside>
       </div>
     </div>
     )
@@ -238,9 +235,11 @@ function VisualRoute({ operations }: { operations: ProcessOperation[] }) {
               <div className="text-sm font-semibold text-blue-700">Операция {operation.operationNo}</div>
               <div className="mt-1 font-semibold text-slate-950">{operation.name}</div>
               <div className="mt-3 space-y-1 text-sm text-slate-700">
-                <div>Установов: {operation.setups.length}</div>
                 <div>Станок: {operationMachine || "Требуется подобрать"}</div>
-                <div>Инструментальных позиций: {toolCount}</div>
+                <div>Установов: {operation.setups.length}</div>
+                <div>Позиций: {toolCount}</div>
+                <div>Требует подбора: {requiredCount}</div>
+                <div>Есть заглушки: {hasManual ? "да" : "нет"}</div>
               </div>
               <div className="mt-3 flex flex-wrap gap-2">
                 <StatusBadge status={operation.status} />
@@ -363,6 +362,7 @@ function SetupSummary({ setup, operationMachineLabel }: { setup: OperationSetup;
       <span className="font-semibold text-slate-950">{setup.name}</span>
       <span className="text-slate-600">Станок: {operationMachineLabel || "Требуется подобрать"}</span>
       <span className="text-slate-600">Позиции: {setup.toolPositions.length}</span>
+      <span className="text-slate-600">Незаполнено: {requiredCount}</span>
       {hasManual ? <SmallTag tone="amber">Есть заглушки</SmallTag> : null}
       {requiredCount ? <SmallTag tone="slate">Требует подбора</SmallTag> : null}
     </div>
@@ -380,6 +380,33 @@ function SetupEditor({ setup, operationId, operationMachineId, occupancyOperatio
 }) {
   function updatePosition(positionId: string, patch: Partial<ToolPosition>) {
     onChange({ toolPositions: setup.toolPositions.map((position) => (position.id === positionId ? { ...position, ...patch } : position)) });
+  }
+
+  function addToolPosition() {
+    const position = emptyToolPosition(nextPositionNo(setup.toolPositions));
+    const nextCellId = nextFreeCellId(operationMachineId, operationId, setup.id, position.id, occupancyOperations, setup.toolPositions);
+    if (nextCellId) {
+      position.cellSource = "catalog";
+      position.cellId = nextCellId;
+    }
+    onChange({ toolPositions: [...setup.toolPositions, position] });
+  }
+
+  function duplicatePosition(position: ToolPosition) {
+    const nextPosition = {
+      ...structuredClone(position),
+      id: `position-${Date.now()}`,
+      positionNo: nextPositionNo(setup.toolPositions),
+      cellSource: "required" as ResourceSource,
+      cellId: undefined,
+      cellManualText: undefined,
+    };
+    onChange({ toolPositions: [...setup.toolPositions, nextPosition] });
+  }
+
+  function deletePosition(positionId: string) {
+    if (!window.confirm("Удалить инструментальную позицию?")) return;
+    onChange({ toolPositions: setup.toolPositions.filter((position) => position.id !== positionId) });
   }
 
   return (
@@ -402,9 +429,9 @@ function SetupEditor({ setup, operationId, operationMachineId, occupancyOperatio
         setupNo={setup.setupNo}
         machineId={operationMachineId}
         occupancyOperations={occupancyOperations}
-        onAdd={() => onChange({ toolPositions: [...setup.toolPositions, emptyToolPosition(nextPositionNo(setup.toolPositions))] })}
-        onDelete={(positionId) => onChange({ toolPositions: setup.toolPositions.filter((position) => position.id !== positionId) })}
-        onDuplicate={(position) => onChange({ toolPositions: [...setup.toolPositions, { ...structuredClone(position), id: `position-${Date.now()}`, positionNo: nextPositionNo(setup.toolPositions) }] })}
+        onAdd={addToolPosition}
+        onDelete={deletePosition}
+        onDuplicate={duplicatePosition}
         onChange={updatePosition}
       />
     </div>
@@ -423,85 +450,102 @@ function ToolPositionList({ positions, operationId, setupId, setupNo, machineId,
   onDuplicate: (position: ToolPosition) => void;
   onChange: (positionId: string, patch: Partial<ToolPosition>) => void;
 }) {
-  const [openPositionId, setOpenPositionId] = useState(positions[0]?.id);
-  const [savedMessage, setSavedMessage] = useState("");
-  const selectedPosition = positions.find((position) => position.id === openPositionId) ?? positions[0];
-
-  useEffect(() => {
-    if (!positions.length) {
-      setOpenPositionId(undefined);
-      return;
-    }
-
-    if (!openPositionId || !positions.some((position) => position.id === openPositionId)) {
-      setOpenPositionId(positions[0].id);
-    }
-  }, [openPositionId, positions]);
-
-  function handleAdd() {
-    onAdd();
-    setSavedMessage("");
-  }
-
-  function handleOpen(positionId: string) {
-    setOpenPositionId(positionId);
-    setSavedMessage("");
-  }
-
-  function handleDuplicate(position: ToolPosition) {
-    onDuplicate(position);
-    setSavedMessage("");
-  }
-
-  function handleDelete(positionId: string) {
-    onDelete(positionId);
-    setSavedMessage("");
-  }
+  const cellItems = machineId ? machineCells.filter((cell) => cell.machineId === machineId) : [];
 
   return (
     <section className="rounded-lg border border-slate-200 bg-slate-50 p-4">
       <div className="flex items-center justify-between gap-3">
         <h3 className="text-base font-semibold text-slate-950">Инструментальные позиции</h3>
-        <button type="button" onClick={handleAdd} className="rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white">+ Добавить инструментальную позицию</button>
+        <button type="button" onClick={onAdd} className="rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white">+ Добавить позицию</button>
       </div>
       {positions.length ? (
         <div className="mt-3 overflow-x-auto rounded-lg border border-slate-200 bg-white">
-          <table className="min-w-full divide-y divide-slate-200 text-sm">
+          <table className="min-w-[1180px] divide-y divide-slate-200 text-sm">
             <thead className="bg-slate-50 text-left text-xs font-semibold uppercase text-slate-500">
               <tr>
-                <th className="px-3 py-2">№</th>
-                <th className="px-3 py-2">Ячейка</th>
-                <th className="px-3 py-2">Оправка</th>
-                <th className="px-3 py-2">Инструмент</th>
-                <th className="px-3 py-2">Статус</th>
-                <th className="px-3 py-2">Метки</th>
-                <th className="px-3 py-2 text-right">Действия</th>
+                <th className="w-20 px-3 py-2">№</th>
+                <th className="w-64 px-3 py-2">Ячейка</th>
+                <th className="w-72 px-3 py-2">Оправка</th>
+                <th className="w-72 px-3 py-2">Инструмент</th>
+                <th className="w-24 px-3 py-2">Кол-во</th>
+                <th className="w-44 px-3 py-2">Статус</th>
+                <th className="w-56 px-3 py-2">Комментарий</th>
+                <th className="w-52 px-3 py-2">Метки</th>
+                <th className="w-28 px-3 py-2 text-right">Действия</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {positions.map((position) => {
                 const hasManual = [position.cellSource, position.holderSource, position.toolSource].includes("manual");
                 const hasRequired = [position.cellSource, position.holderSource, position.toolSource].includes("required");
-                const isOpen = position.id === selectedPosition?.id;
+                const occupancy = getCellOccupancy({
+                  machineId,
+                  cellId: position.cellSource === "catalog" ? position.cellId : undefined,
+                  operationId,
+                  setupId,
+                  positionId: position.id,
+                  operations: occupancyOperations,
+                });
 
                 return (
-                  <tr key={position.id} onClick={() => handleOpen(position.id)} className={`${isOpen ? "bg-blue-50/70" : "bg-white"} cursor-pointer`}>
-                    <td className="whitespace-nowrap px-3 py-3 font-semibold text-blue-700">{position.positionNo}</td>
-                    <td className="px-3 py-3 text-slate-700">{resourceDisplay(position.cellSource, position.cellId, position.cellManualText).value}</td>
-                    <td className="px-3 py-3 text-slate-700">{resourceDisplay(position.holderSource, position.holderId, position.holderManualText).value}</td>
-                    <td className="px-3 py-3 text-slate-700">{resourceDisplay(position.toolSource, position.toolId, position.toolManualText).value}</td>
-                    <td className="px-3 py-3"><StatusBadge status={position.status} /></td>
+                  <tr key={position.id} className="bg-white align-top">
+                    <td className="px-3 py-3">
+                      <input value={String(position.positionNo)} onChange={(event) => onChange(position.id, { positionNo: Number(event.target.value) || position.positionNo })} className="w-16 rounded-md border border-slate-200 px-2 py-1.5 text-sm font-semibold text-blue-700" />
+                    </td>
+                    <td className="px-3 py-3">
+                      <CompactResourceSelector
+                        source={position.cellSource}
+                        catalogId={position.cellId}
+                        manualText={position.cellManualText}
+                        catalogItems={cellItems}
+                        disabledText="Сначала выберите станок"
+                        getOptionLabel={(item) => cellOptionLabel(item.id, operationId, setupId, position.id, occupancyOperations)}
+                        onChange={(value) => onChange(position.id, { cellSource: value.source, cellId: value.catalogId, cellManualText: value.manualText })}
+                      />
+                    </td>
+                    <td className="px-3 py-3">
+                      <CompactResourceSelector
+                        source={position.holderSource}
+                        catalogId={position.holderId}
+                        manualText={position.holderManualText}
+                        catalogItems={holders}
+                        getOptionLabel={(item) => item.name}
+                        onChange={(value) => onChange(position.id, { holderSource: value.source, holderId: value.catalogId, holderManualText: value.manualText })}
+                      />
+                    </td>
+                    <td className="px-3 py-3">
+                      <CompactResourceSelector
+                        source={position.toolSource}
+                        catalogId={position.toolId}
+                        manualText={position.toolManualText}
+                        catalogItems={tools}
+                        getOptionLabel={(item) => item.name}
+                        onChange={(value) => onChange(position.id, { toolSource: value.source, toolId: value.catalogId, toolManualText: value.manualText })}
+                      />
+                    </td>
+                    <td className="px-3 py-3">
+                      <input value={String(position.quantity)} onChange={(event) => onChange(position.id, { quantity: Number(event.target.value) || 1 })} className="w-20 rounded-md border border-slate-200 px-2 py-1.5 text-sm" />
+                    </td>
+                    <td className="px-3 py-3">
+                      <select value={position.status} onChange={(event) => onChange(position.id, { status: event.target.value as OperationStatus })} className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-sm">
+                        {statuses.map((status) => <option key={status} value={status}>{status}</option>)}
+                      </select>
+                    </td>
+                    <td className="px-3 py-3">
+                      <input value={position.comment} onChange={(event) => onChange(position.id, { comment: event.target.value })} className="w-full rounded-md border border-slate-200 px-2 py-1.5 text-sm" />
+                    </td>
                     <td className="px-3 py-3">
                       <div className="flex flex-wrap gap-1">
+                        {occupancy ? <SmallTag tone="amber">Ячейка занята</SmallTag> : null}
                         {hasManual ? <SmallTag tone="amber">Ручная заглушка</SmallTag> : null}
                         {hasRequired ? <SmallTag tone="slate">Требует подбора</SmallTag> : null}
                       </div>
+                      {occupancy ? <div className="mt-1 text-xs leading-5 text-amber-700">{occupancy.cellLabel} уже занята: Операция {occupancy.operationNo} / Установ {occupancy.setupNo} / Инструмент: {occupancy.toolLabel}</div> : null}
                     </td>
                     <td className="px-3 py-3">
                       <div className="flex justify-end gap-2">
-                        <button type="button" onClick={(event) => { event.stopPropagation(); handleOpen(position.id); }} className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-semibold text-slate-700">Открыть</button>
-                        <button type="button" onClick={(event) => { event.stopPropagation(); handleDuplicate(position); }} className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-semibold text-slate-700">Дублировать</button>
-                        <button type="button" onClick={(event) => { event.stopPropagation(); handleDelete(position.id); }} className="rounded-md border border-rose-200 bg-white px-2 py-1 text-xs font-semibold text-rose-700">Удалить</button>
+                        <button type="button" onClick={() => onDuplicate(position)} className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-semibold text-slate-700">Дубл.</button>
+                        <button type="button" onClick={() => onDelete(position.id)} className="rounded-md border border-rose-200 bg-white px-2 py-1 text-xs font-semibold text-rose-700">Удал.</button>
                       </div>
                     </td>
                   </tr>
@@ -513,108 +557,43 @@ function ToolPositionList({ positions, operationId, setupId, setupNo, machineId,
       ) : (
         <EmptyState text="Инструментальные позиции пока не добавлены." />
       )}
-      <button type="button" onClick={handleAdd} className="mt-3 rounded-md border border-blue-200 bg-white px-3 py-2 text-sm font-semibold text-blue-700">+ Добавить инструментальную позицию</button>
-      {selectedPosition ? (
-        <ToolPositionEditor
-          position={selectedPosition}
-          operationId={operationId}
-          setupId={setupId}
-          setupNo={setupNo}
-          machineId={machineId}
-          occupancyOperations={occupancyOperations}
-          savedMessage={savedMessage}
-          onChange={(patch) => onChange(selectedPosition.id, patch)}
-          onSave={() => setSavedMessage("Позиция сохранена в состоянии редактора")}
-          onDuplicate={() => handleDuplicate(selectedPosition)}
-          onDelete={() => handleDelete(selectedPosition.id)}
-        />
-      ) : null}
+      <button type="button" onClick={onAdd} className="mt-3 rounded-md border border-blue-200 bg-white px-3 py-2 text-sm font-semibold text-blue-700">+ Добавить позицию</button>
     </section>
   );
 }
 
-function ToolPositionEditor({ position, operationId, setupId, setupNo, machineId, occupancyOperations, savedMessage, onChange, onSave, onDuplicate, onDelete }: {
-  position: ToolPosition;
-  operationId: string;
-  setupId: string;
-  setupNo: number;
-  machineId?: string;
-  occupancyOperations: ProcessOperation[];
-  savedMessage: string;
-  onChange: (patch: Partial<ToolPosition>) => void;
-  onSave: () => void;
-  onDuplicate: () => void;
-  onDelete: () => void;
+function CompactResourceSelector<T extends { id: string }>({ source, catalogId, manualText, catalogItems, disabledText, getOptionLabel, onChange }: {
+  source: ResourceSource;
+  catalogId?: string;
+  manualText?: string;
+  catalogItems: T[];
+  disabledText?: string;
+  getOptionLabel: (item: T) => string;
+  onChange: (value: { source: ResourceSource; catalogId?: string; manualText?: string }) => void;
 }) {
-  const cellOptions = machineId ? machineCells.filter((cell) => cell.machineId === machineId) : [];
-  const cellOccupancy = getCellOccupancy({
-    machineId,
-    cellId: position.cellSource === "catalog" ? position.cellId : undefined,
-    operationId,
-    setupId,
-    positionId: position.id,
-    operations: occupancyOperations,
-  });
-  const summary = [
-    resourceDisplay(position.cellSource, position.cellId, position.cellManualText).value,
-    resourceDisplay(position.holderSource, position.holderId, position.holderManualText).value,
-    resourceDisplay(position.toolSource, position.toolId, position.toolManualText).value,
-  ].join(" → ");
-
   return (
-    <div className="mt-4 rounded-lg border border-blue-200 bg-white p-5 shadow-sm">
-      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-100 pb-4">
-        <div>
-          <div className="text-xs font-semibold uppercase text-blue-700">Редактор позиции</div>
-          <h4 className="mt-1 text-lg font-semibold text-slate-950">Позиция {position.positionNo}</h4>
-          <div className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">{summary}</div>
-          <div className="mt-2"><StatusBadge status={position.status} /></div>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <button type="button" onClick={onSave} className="rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white">Сохранить</button>
-          <button type="button" onClick={onDuplicate} className="rounded-md border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700">Дублировать позицию</button>
-          <button type="button" onClick={onDelete} className="rounded-md border border-rose-200 px-3 py-2 text-sm font-semibold text-rose-700">Удалить позицию</button>
-        </div>
+    <div className="space-y-1">
+      <div className="flex gap-1">
+        <select value={source} onChange={(event) => onChange({ source: event.target.value as ResourceSource })} className="w-24 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs">
+          <option value="catalog">Справ.</option>
+          <option value="manual">Ручн.</option>
+          <option value="required">Подбор</option>
+        </select>
+        {source === "catalog" ? (
+          <select value={catalogId ?? ""} disabled={!catalogItems.length} onChange={(event) => onChange({ source: "catalog", catalogId: event.target.value || undefined })} className="min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-sm disabled:bg-slate-100 disabled:text-slate-500">
+            <option value="">{catalogItems.length ? "Выбрать" : disabledText ?? "Нет данных"}</option>
+            {catalogItems.map((item) => <option key={item.id} value={item.id}>{getOptionLabel(item)}</option>)}
+          </select>
+        ) : null}
+        {source === "manual" ? (
+          <input value={manualText ?? ""} placeholder="Ручной ввод" onChange={(event) => onChange({ source: "manual", manualText: event.target.value })} className="min-w-0 flex-1 rounded-md border border-slate-200 px-2 py-1.5 text-sm" />
+        ) : null}
+        {source === "required" ? (
+          <div className="min-w-0 flex-1 rounded-md border border-slate-200 bg-slate-100 px-2 py-1.5 text-sm font-semibold text-slate-500">Требуется подобрать</div>
+        ) : null}
       </div>
-      {savedMessage ? <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700">{savedMessage}</div> : null}
-
-      <section className="mt-5 rounded-lg border border-slate-200 bg-slate-50 p-4">
-        <h5 className="text-sm font-semibold text-slate-950">Основное</h5>
-        <div className="mt-4 grid gap-4 md:grid-cols-2">
-          <Field label="№ позиции"><Input value={String(position.positionNo)} onChange={(value) => onChange({ positionNo: Number(value) || position.positionNo })} /></Field>
-          <Field label="Количество"><Input value={String(position.quantity)} onChange={(value) => onChange({ quantity: Number(value) || 1 })} /></Field>
-          <Field label="Статус"><Select value={position.status} options={statuses} onChange={(value) => onChange({ status: value as OperationStatus })} /></Field>
-          <Field label="Комментарий"><Textarea value={position.comment} onChange={(value) => onChange({ comment: value })} rows={3} /></Field>
-        </div>
-      </section>
-
-      <section className="mt-5 rounded-lg border border-slate-200 bg-slate-50 p-4">
-        <h5 className="text-sm font-semibold text-slate-950">Инструментальная связка</h5>
-        <div className="mt-4 space-y-4">
-          <div>
-            {!machineId ? <div className="mb-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-700">Сначала выберите станок операции или используйте ручной ввод ячейки.</div> : null}
-            <ResourceSelector
-              label="Ячейка станка"
-              source={position.cellSource}
-              catalogId={position.cellId}
-              manualText={position.cellManualText}
-              catalogItems={cellOptions}
-              getLabel={(item) => item.label}
-              getOptionLabel={(item) => cellOptionLabel(item.id, operationId, setupId, position.id, occupancyOperations)}
-              onChange={(value) => onChange({ cellSource: value.source, cellId: value.catalogId, cellManualText: value.manualText })}
-            />
-            {cellOccupancy ? (
-              <div className={`mt-2 rounded-md border px-3 py-2 text-sm font-semibold ${cellOccupancy.sameOperation ? "border-amber-200 bg-amber-50 text-amber-800" : "border-blue-200 bg-blue-50 text-blue-800"}`}>
-                {cellOccupancy.sameOperation
-                  ? `${cellOccupancy.cellLabel} уже занята: Операция ${cellOccupancy.operationNo} / Установ ${cellOccupancy.setupNo} / Инструмент: ${cellOccupancy.toolLabel}`
-                  : `${cellOccupancy.cellLabel} используется в другой операции на этом станке: Операция ${cellOccupancy.operationNo} / Установ ${cellOccupancy.setupNo} / Инструмент: ${cellOccupancy.toolLabel}`}
-              </div>
-            ) : null}
-          </div>
-          <ResourceSelector label="Оправка инструмента" source={position.holderSource} catalogId={position.holderId} manualText={position.holderManualText} catalogItems={holders} getLabel={(item) => item.name} onChange={(value) => onChange({ holderSource: value.source, holderId: value.catalogId, holderManualText: value.manualText })} />
-          <ResourceSelector label="Инструмент" source={position.toolSource} catalogId={position.toolId} manualText={position.toolManualText} catalogItems={tools} getLabel={(item) => item.name} onChange={(value) => onChange({ toolSource: value.source, toolId: value.catalogId, toolManualText: value.manualText })} />
-        </div>
-      </section>
+      {source === "manual" ? <SmallTag tone="amber">Ручная</SmallTag> : null}
+      {source === "required" ? <SmallTag tone="slate">Подбор</SmallTag> : null}
     </div>
   );
 }
@@ -720,6 +699,27 @@ function cellOptionLabel(cellId: string, operationId: string, setupId: string, p
   if (!occupancy) return `${cell.number} — свободна`;
 
   return `${cell.number} — занята (Опер. ${occupancy.operationNo}, ${occupancy.toolLabel})`;
+}
+
+function nextFreeCellId(machineId: string | undefined, operationId: string, setupId: string, positionId: string, operations: ProcessOperation[], currentPositions: ToolPosition[]) {
+  if (!machineId) return undefined;
+
+  return machineCells
+    .filter((cell) => cell.machineId === machineId)
+    .sort((a, b) => a.number - b.number)
+    .find((cell) => {
+      const usedInCurrentSetup = currentPositions.some((position) => position.cellSource === "catalog" && position.cellId === cell.id);
+      if (usedInCurrentSetup) return false;
+
+      return !getCellOccupancy({
+        machineId,
+        cellId: cell.id,
+        operationId,
+        setupId,
+        positionId,
+        operations,
+      });
+    })?.id;
 }
 
 function resourceDisplay(source: ResourceSource, catalogId?: string, manualText?: string) {
