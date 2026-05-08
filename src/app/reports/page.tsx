@@ -5,12 +5,13 @@ import {
   parts,
   resolveResourceValue,
 } from "../mock-data";
+import { sortOperationsByNumber } from "../process-model";
 import { DataTable, InfoCard, PageHeader, ResourceValue } from "../ui";
 
 export default function ReportsPage() {
   const part = parts[0];
   const route = getRouteByPartId(part.id);
-  const operations = route ? getOperationsByRouteId(route.id) : [];
+  const operations = route ? sortOperationsByNumber(getOperationsByRouteId(route.id)) : [];
 
   return (
     <div className="space-y-6">

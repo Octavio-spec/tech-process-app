@@ -10,6 +10,7 @@ import {
   loadProjectsFromStorage,
   machineName,
   savePartsToStorage,
+  sortOperationsByNumber,
   type ProcessOperation,
   type ProcessPart,
   type ProcessProject,
@@ -34,7 +35,7 @@ export function PartDetailClient({ partId, projectId, initialPart }: { partId: s
     setProjects(loadedProjects);
     setPart(nextPart);
     setProject(loadedProjects.find((item) => item.id === (projectId ?? nextPart?.projectId)));
-    setOperations(loadOperationsFromStorage(partId));
+    setOperations(sortOperationsByNumber(loadOperationsFromStorage(partId)));
   }, [initialPart, partId, projectId]);
 
   function editPart(nextPart: ProcessPart) {
@@ -73,6 +74,7 @@ export function PartDetailClient({ partId, projectId, initialPart }: { partId: s
       <div className="flex flex-wrap items-center gap-2">
         <button type="button" onClick={() => setIsEditOpen(true)} className="rounded-md border border-blue-200 bg-white px-4 py-2 text-sm font-semibold text-blue-700">Редактировать деталь</button>
         <Link href={`/parts/${part.id}/process`} className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white">Редактировать техпроцесс</Link>
+        <Link href={`/parts/${part.id}/flow`} className="rounded-md border border-blue-200 bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-700">Свободная схема</Link>
         {!part.isDeleted ? <button type="button" onClick={deletePart} className="rounded-md border border-rose-200 px-4 py-2 text-sm font-semibold text-rose-700">Удалить деталь</button> : null}
         {part.isDeleted ? <button type="button" onClick={restorePart} className="rounded-md border border-emerald-200 px-4 py-2 text-sm font-semibold text-emerald-700">Восстановить деталь</button> : null}
       </div>
@@ -108,7 +110,7 @@ export function PartDetailClient({ partId, projectId, initialPart }: { partId: s
 
       <InfoCard title="Расширенный маршрут">
         <div className="flex gap-3 overflow-x-auto pb-2">
-          {operations.map((operation) => {
+          {sortOperationsByNumber(operations).map((operation) => {
             const operationMachine = operation.machineSource === "catalog"
               ? machineName(operation.machineId)
               : operation.machineSource === "manual"

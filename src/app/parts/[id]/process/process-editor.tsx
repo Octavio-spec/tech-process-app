@@ -14,7 +14,9 @@ import {
   loadProjectsFromStorage,
   machineName,
   nextOperationNo,
+  normalizeOperationNo,
   saveOperationsToStorage,
+  sortOperationsByNumber,
   toolName,
   type OperationSetup,
   type OperationStatus,
@@ -44,6 +46,7 @@ export function ProcessEditor({ partId, projectId, initialPart }: ProcessEditorP
   const [selectedSetupId, setSelectedSetupId] = useState<string>();
   const [savedMessage, setSavedMessage] = useState("");
   const [isDirty, setIsDirty] = useState(false);
+  const [operationNoError, setOperationNoError] = useState("");
 
   useEffect(() => {
     const nextPart = loadPartsFromStorage().find((item) => item.id === partId) ?? initialPart;
@@ -66,9 +69,20 @@ export function ProcessEditor({ partId, projectId, initialPart }: ProcessEditorP
     [operations, selectedOperationId],
   );
   const selectedSetup = selectedOperation?.setups.find((setup) => setup.id === selectedSetupId) ?? selectedOperation?.setups[0];
+  const sortedOperations = useMemo(() => sortOperationsByNumber(operations), [operations]);
 
   function updateOperation(patch: Partial<ProcessOperation>) {
     if (!selectedOperation) return;
+    if (typeof patch.operationNo === "string") {
+      const nextOperationNoValue = patch.operationNo.trim();
+      const hasDuplicate = operations.some(
+        (operation) =>
+          operation.id !== selectedOperation.id &&
+          normalizeOperationNo(operation.operationNo) === normalizeOperationNo(nextOperationNoValue),
+      );
+
+      setOperationNoError(!nextOperationNoValue ? "Номер операции обязателен" : hasDuplicate ? "Операция с таким номером уже существует" : "");
+    }
     setOperations((current) => current.map((operation) => (operation.id === selectedOperation.id ? { ...operation, ...patch } : operation)));
     setSavedMessage("");
     setIsDirty(true);
@@ -103,11 +117,12 @@ export function ProcessEditor({ partId, projectId, initialPart }: ProcessEditorP
 
   function duplicateOperation() {
     if (!selectedOperation) return;
+    const operationNo = nextOperationNo(operations);
     const operation = {
       ...structuredClone(selectedOperation),
       id: `operation-${Date.now()}`,
-      operationNo: nextOperationNo(operations),
-      number: nextOperationNo(operations),
+      operationNo,
+      number: operationNo,
       status: "Черновик" as OperationStatus,
       name: `${selectedOperation.name} копия`,
       title: `${selectedOperation.name} копия`,
@@ -143,9 +158,30 @@ export function ProcessEditor({ partId, projectId, initialPart }: ProcessEditorP
   }
 
   function saveProcess() {
+    const hasEmptyNumber = operations.some((operation) => !operation.operationNo.trim());
+    const seenNumbers = new Set<string>();
+    const hasDuplicate = operations.some((operation) => {
+      const normalized = normalizeOperationNo(operation.operationNo);
+      if (!normalized) return false;
+      if (seenNumbers.has(normalized)) return true;
+      seenNumbers.add(normalized);
+      return false;
+    });
+
+    if (hasEmptyNumber) {
+      setOperationNoError("Номер операции обязателен");
+      return;
+    }
+
+    if (hasDuplicate) {
+      setOperationNoError("Операция с таким номером уже существует");
+      return;
+    }
+
     saveOperationsToStorage(partId, operations);
     setSavedMessage("Техпроцесс сохранён");
     setIsDirty(false);
+    setOperationNoError("");
   }
 
   return (
@@ -162,11 +198,11 @@ export function ProcessEditor({ partId, projectId, initialPart }: ProcessEditorP
         <span>→</span>
         <span>Техпроцесс</span>
       </nav>
-      <VisualRoute operations={operations} />
+      <VisualRoute operations={sortedOperations} />
       <div className="grid min-h-[calc(100vh-260px)] gap-4 xl:grid-cols-[300px_minmax(0,1fr)]">
         <OperationList
           part={part}
-          operations={operations}
+          operations={sortedOperations}
           selectedOperationId={selectedOperation?.id}
           onSelect={(operation) => {
             setSelectedOperationId(operation.id);
@@ -194,7 +230,7 @@ export function ProcessEditor({ partId, projectId, initialPart }: ProcessEditorP
 
           {selectedOperation ? (
             <>
-              <OperationEditor operation={selectedOperation} onChange={updateOperation} />
+              <OperationEditor operation={selectedOperation} operationNoError={operationNoError} onChange={updateOperation} />
               <SetupAccordion
                 setups={selectedOperation.setups}
                 operationId={selectedOperation.id}
@@ -284,11 +320,14 @@ function OperationList({ part, operations, selectedOperationId, onSelect, onAdd 
   );
 }
 
-function OperationEditor({ operation, onChange }: { operation: ProcessOperation; onChange: (patch: Partial<ProcessOperation>) => void }) {
+function OperationEditor({ operation, operationNoError, onChange }: { operation: ProcessOperation; operationNoError: string; onChange: (patch: Partial<ProcessOperation>) => void }) {
   return (
     <div className="space-y-4">
       <div className="grid gap-4 md:grid-cols-2">
-        <Field label="Номер операции"><Input value={operation.operationNo} onChange={(value) => onChange({ operationNo: value, number: value })} /></Field>
+        <Field label="Номер операции">
+          <Input value={operation.operationNo} onChange={(value) => onChange({ operationNo: value, number: value })} />
+          {operationNoError ? <div className="mt-1 text-sm font-semibold text-rose-700">{operationNoError}</div> : null}
+        </Field>
         <Field label="Статус"><Select value={operation.status} options={statuses} onChange={(value) => onChange({ status: value as OperationStatus })} /></Field>
         <Field label="Название"><Input value={operation.name} onChange={(value) => onChange({ name: value, title: value })} /></Field>
         <Field label="Норма времени"><Input value={operation.timeNorm} onChange={(value) => onChange({ timeNorm: value })} /></Field>

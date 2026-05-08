@@ -8,6 +8,7 @@ import {
   parts,
   resolveResourceValue,
 } from "../../../../mock-data";
+import { sortOperationsByNumber } from "../../../../process-model";
 import { InfoCard, PageHeader, ResourceValue, StatusBadge } from "../../../../ui";
 
 type OperationDetailPageProps = {
@@ -22,7 +23,7 @@ export default async function OperationDetailPage({ params }: OperationDetailPag
   const part = parts.find((item) => item.id === id);
   const route = part ? getRouteByPartId(part.id) : undefined;
   const operation = operations.find((item) => item.id === operationId);
-  const routeOperations = route ? getOperationsByRouteId(route.id) : [];
+  const routeOperations = route ? sortOperationsByNumber(getOperationsByRouteId(route.id)) : [];
   const isOperationInPart = routeOperations.some((item) => item.id === operation?.id);
 
   if (!part || !route || !operation || !isOperationInPart) {

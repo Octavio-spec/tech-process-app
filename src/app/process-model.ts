@@ -47,7 +47,7 @@ export function getInitialOperationsForPart(partId: string): ProcessOperation[] 
   const route = getRouteByPartId(partId);
   const routeOperations = route ? getOperationsByRouteId(route.id) : operations.filter((operation) => operation.partId === partId);
 
-  return routeOperations.map((operation) => {
+  return sortOperationsByNumber(routeOperations.map((operation) => {
     const resource = getOperationResource(operation.id);
 
     return {
@@ -91,7 +91,7 @@ export function getInitialOperationsForPart(partId: string): ProcessOperation[] 
             },
           ],
     };
-  });
+  }));
 }
 
 export function emptyOperation(partId: string, operationNo: string): ProcessOperation {
@@ -146,6 +146,40 @@ export function nextOperationNo(operationsList: ProcessOperation[]) {
   }, 0);
 
   return String(maxNo + 10).padStart(3, "0");
+}
+
+export function operationNumberSortKey(operationNo?: string) {
+  const raw = (operationNo ?? "").trim();
+  const match = raw.match(/^(\d+)(.*)$/);
+
+  if (!match) {
+    return { isValid: false, number: Number.POSITIVE_INFINITY, suffix: raw.toLowerCase(), raw };
+  }
+
+  return {
+    isValid: true,
+    number: Number.parseInt(match[1], 10),
+    suffix: match[2].trim().toLowerCase(),
+    raw,
+  };
+}
+
+export function normalizeOperationNo(operationNo?: string) {
+  const key = operationNumberSortKey(operationNo);
+  if (!key.isValid) return (operationNo ?? "").trim().toLowerCase();
+  return `${key.number}${key.suffix}`;
+}
+
+export function sortOperationsByNumber<T extends { operationNo?: string }>(operationsList: T[]): T[] {
+  return [...operationsList].sort((first, second) => {
+    const a = operationNumberSortKey(first.operationNo);
+    const b = operationNumberSortKey(second.operationNo);
+
+    if (a.isValid !== b.isValid) return a.isValid ? -1 : 1;
+    if (a.number !== b.number) return a.number - b.number;
+    if (a.suffix !== b.suffix) return a.suffix.localeCompare(b.suffix, "ru");
+    return a.raw.localeCompare(b.raw, "ru");
+  });
 }
 
 export function loadPartsFromStorage(): ProcessPart[] {
