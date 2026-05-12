@@ -374,6 +374,7 @@ export function normalizeOperations(nextOperations: ProcessOperation[]): Process
 export function normalizeProjects(nextProjects: ProcessProject[]): ProcessProject[] {
   return nextProjects.map((project) => ({
     ...project,
+    priority: project.priority ?? "normal",
     isDeleted: project.isDeleted ?? false,
     deletedAt: project.deletedAt ?? null,
     createdAt: project.createdAt ?? project.updatedAt ?? new Date().toLocaleDateString("ru-RU"),

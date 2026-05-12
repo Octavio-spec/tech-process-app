@@ -71,6 +71,8 @@ type FlowEntity = ProcessProject | ProcessPart | ProcessOperation | OperationSet
 
 type FlowNodeData = {
   blockType: FlowBlockType;
+  entityType?: FlowBlockType | "group";
+  entityId?: string;
   title: string;
   subtitle?: string;
   entity: FlowEntity;
@@ -80,7 +82,8 @@ type FlowNodeData = {
 type ProcessFlowNode = Node<FlowNodeData, "processBlock">;
 type ProcessFlowEdge = Edge;
 type FlowSnapshot = { nodes: ProcessFlowNode[]; edges: ProcessFlowEdge[] };
-type FlowEditorMode = "part" | "project";
+type FlowEditorMode = "part" | "project" | "projects";
+type ProjectsFlowView = "active" | "archive";
 
 const flowTypeLabels: Record<FlowBlockType, string> = {
   project: "Проект",
@@ -124,7 +127,7 @@ const groupConfigByType = Object.fromEntries(
   Object.values(groupConfigByParent).map((config) => [config.groupType, config]),
 ) as Record<GroupBlockType, NonNullable<(typeof groupConfigByParent)[FlowBlockType]>>;
 
-const statusOptions: OperationStatus[] = ["Черновик", "В работе", "Требует уточнения", "Готово", "Архив"];
+const statusOptions: OperationStatus[] = ["Черновик", "В работе", "Требует уточнения", "Готово", "Выполнен", "Выполнена", "Архив"];
 const sourceOptions: Array<{ value: ResourceSource; label: string }> = [
   { value: "catalog", label: "Из справочника" },
   { value: "manual", label: "Ручной ввод" },
@@ -137,16 +140,23 @@ export function FlowEditor({
   initialPart,
   initialProject,
   mode = "part",
+  initialView = "active",
 }: {
   partId?: string;
   projectId?: string;
   initialPart?: ProcessPart;
   initialProject?: ProcessProject;
   mode?: FlowEditorMode;
+  initialView?: ProjectsFlowView;
 }) {
   const [part, setPart] = useState<ProcessPart | undefined>(initialPart);
   const [project, setProject] = useState<ProcessProject | undefined>();
   const [projectParts, setProjectParts] = useState<ProcessPart[]>([]);
+  const [projects, setProjects] = useState<ProcessProject[]>([]);
+  const [projectsView, setProjectsView] = useState<ProjectsFlowView>(initialView);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | undefined>(projectId);
+  const [selectedPartId, setSelectedPartId] = useState<string | undefined>(partId);
+  const suppressSelectionRef = useRef(false);
   const [operations, setOperations] = useState<ProcessOperation[]>([]);
   const [nodes, setNodes] = useState<ProcessFlowNode[]>([]);
   const [edges, setEdges] = useState<ProcessFlowEdge[]>([]);
@@ -163,7 +173,7 @@ export function FlowEditor({
   const flowCanvasRef = useRef<HTMLDivElement | null>(null);
   const flowInstanceRef = useRef<ReactFlowInstance<ProcessFlowNode, ProcessFlowEdge> | null>(null);
 
-  const storageKey = mode === "project" ? `tech-process-flow-project-${projectId}` : `tech-process:flow:${partId}`;
+  const storageKey = mode === "projects" ? "tech-process-flow-projects" : mode === "project" ? `tech-process-flow-project-${projectId}` : `tech-process:flow:${partId}`;
   const selectedNode = useMemo(() => nodes.find((node) => node.id === selectedNodeId), [nodes, selectedNodeId]);
   const displayNodes = useMemo(() => enrichFlowNodes(nodes, edges), [edges, nodes]);
   const displayEdges = useMemo(() => enrichFlowEdges(edges), [edges]);
@@ -174,22 +184,45 @@ export function FlowEditor({
     setNodes(nextNodes);
     setEdges(nextEdges);
     persistFlowSnapshot(storageKey, nextNodes, nextEdges);
+    persistFlowData(nextNodes, nextEdges);
     setDirty(true);
     setMessage("");
-  }, [edges, nodes, storageKey]);
+  }, [edges, mode, nodes, partId, selectedPartId, storageKey]);
+
+  function persistFlowData(nextNodes: ProcessFlowNode[], nextEdges: ProcessFlowEdge[]) {
+    persistFlowEntities(nextNodes);
+
+    if (mode === "project") {
+      persistFlowOperationsForNodes(nextNodes, nextEdges);
+      return;
+    }
+
+    if (mode === "projects") {
+      persistFlowOperationsForNodes(nextNodes, nextEdges, selectedPartId);
+      return;
+    }
+
+    if (partId) {
+      persistFlowOperations(partId, nextNodes, nextEdges);
+    }
+  }
 
   useEffect(() => {
     const loadedParts = loadPartsFromStorage();
     const loadedProjects = loadProjectsFromStorage();
+    const visibleProjects = getVisibleProjects(loadedProjects, projectsView);
     const nextPart = loadedParts.find((item) => item.id === partId) ?? initialPart;
-    const nextProject = loadedProjects.find((item) => item.id === (projectId ?? nextPart?.projectId)) ?? initialProject;
+    const nextProject = loadedProjects.find((item) => item.id === (projectId ?? selectedProjectId ?? nextPart?.projectId)) ?? initialProject;
     const activeProjectParts = nextProject ? getActiveProjectParts(loadedParts, nextProject.id) : [];
     const nextOperations = mode === "project"
       ? activeProjectParts.flatMap((item) => sortOperationsByNumber(loadOperationsFromStorage(item.id)))
+      : mode === "projects"
+        ? getPartsForProjects(loadedParts, visibleProjects, projectsView).flatMap((item) => sortOperationsByNumber(loadOperationsFromStorage(item.id)))
       : partId ? sortOperationsByNumber(loadOperationsFromStorage(partId)) : [];
 
     setPart(nextPart);
     setProject(nextProject);
+    setProjects(loadedProjects);
     setProjectParts(activeProjectParts);
     setOperations(nextOperations);
 
@@ -201,14 +234,17 @@ export function FlowEditor({
           nodes: (parsed.nodes ?? []).map(normalizeFlowNode),
           edges: (parsed.edges ?? []).map(normalizeFlowEdge),
         };
-        const synced = mode === "project" && nextProject
+        const synced = mode === "projects"
+          ? syncProjectsFlow(savedSnapshot, visibleProjects, loadedParts, selectedProjectId, selectedPartId, projectsView)
+          : mode === "project" && nextProject
           ? syncProjectFlow(savedSnapshot, nextProject, activeProjectParts, getOperationsByPart(activeProjectParts))
           : savedSnapshot;
         setNodes(synced.nodes);
         setEdges(synced.edges);
         persistFlowSnapshot(storageKey, synced.nodes, synced.edges);
-        setSelectedNodeId(synced.nodes?.[0]?.id ?? null);
-        setSelectedNodeIds(synced.nodes?.[0]?.id ? [synced.nodes[0].id] : []);
+        const nextSelectionId = selectionIdForSyncedFlow(synced.nodes, mode, selectedProjectId, selectedPartId);
+        setSelectedNodeId(nextSelectionId);
+        setSelectedNodeIds(nextSelectionId ? [nextSelectionId] : []);
         setSelectedEdgeIds([]);
         return;
       } catch {
@@ -216,16 +252,19 @@ export function FlowEditor({
       }
     }
 
-    const initial = mode === "project"
+    const initial = mode === "projects"
+      ? buildProjectsFlow(visibleProjects, loadedParts, selectedProjectId, selectedPartId, projectsView)
+      : mode === "project"
       ? buildProjectFlow(nextProject, activeProjectParts, getOperationsByPart(activeProjectParts))
       : buildInitialFlow(nextProject, nextPart, nextOperations);
     setNodes(initial.nodes);
     setEdges(initial.edges);
-    setSelectedNodeId(initial.nodes[0]?.id ?? null);
-    setSelectedNodeIds(initial.nodes[0]?.id ? [initial.nodes[0].id] : []);
+    const nextSelectionId = selectionIdForSyncedFlow(initial.nodes, mode, selectedProjectId, selectedPartId);
+    setSelectedNodeId(nextSelectionId);
+    setSelectedNodeIds(nextSelectionId ? [nextSelectionId] : []);
     setSelectedEdgeIds([]);
     persistFlowSnapshot(storageKey, initial.nodes, initial.edges);
-  }, [initialPart, initialProject, mode, partId, projectId, storageKey]);
+  }, [initialPart, initialProject, mode, partId, projectId, projectsView, selectedPartId, selectedProjectId, storageKey]);
 
   useEffect(() => {
     function loadFlowControls() {
@@ -351,10 +390,10 @@ export function FlowEditor({
       : nodes;
 
     const nextEdges = addEdge(createFlowEdge(connection.source, connection.target), edges);
-    commit(layoutFlowTree(nextNodes, nextEdges), nextEdges);
+    commit(layoutAfterStructuralChange(nextNodes, nextEdges, mode, selectedProjectId), nextEdges);
   }
 
-  function addBlock(parentId = selectedNodeId) {
+  function addBlock(parentId: string | null | undefined = selectedNodeId) {
     const parentNode = parentId ? nodes.find((node) => node.id === parentId) : undefined;
 
     if (isGroupType(parentNode?.data.blockType)) {
@@ -362,7 +401,9 @@ export function FlowEditor({
       return;
     }
 
-    const blockType = parentNode ? childTypeByParent[parentNode.data.blockType] ?? (parentNode.data.blockType === "unknown" ? "unknown" : undefined) : "unknown";
+    const blockType = parentNode
+      ? childTypeByParent[parentNode.data.blockType] ?? (parentNode.data.blockType === "unknown" ? "unknown" : undefined)
+      : mode === "projects" ? "project" : "unknown";
 
     if (!blockType) {
       setMessage("Инструментальная позиция — конечный блок цепочки");
@@ -373,7 +414,7 @@ export function FlowEditor({
       ? getNextChildPosition(parentNode, outgoing(nodes, edges, parentNode.id, blockType), nodes)
       : findFreePosition({ x: 220, y: 160 }, nodes);
     const contextPart = parentNode ? findNearestPart(nodes, edges, parentNode.id) ?? part : part;
-    const contextProject = mode === "project" ? project : project;
+    const contextProject = parentNode ? findNearestProject(nodes, edges, parentNode.id) ?? project : project;
     const contextOperations = contextPart ? sortOperationsByNumber(loadOperationsFromStorage(contextPart.id)) : operations;
     const node = createFlowNode(blockType, position, { part: contextPart, project: contextProject, operations: contextOperations, parentNode, nodes, edges });
     const nextEdges = parentNode
@@ -381,12 +422,16 @@ export function FlowEditor({
       : edges;
 
     const committedNodes = [...nodes, node];
-    if (mode === "project" && blockType === "part") {
+    if ((mode === "project" || mode === "projects") && (blockType === "part" || blockType === "project")) {
       persistFlowEntities(committedNodes);
-      setProjectParts(getActiveProjectParts(loadPartsFromStorage(), project?.id));
+      const loadedParts = loadPartsFromStorage();
+      const loadedProjects = loadProjectsFromStorage();
+      setProjects(loadedProjects);
+      setProjectParts(getActiveProjectParts(loadedParts, project?.id));
+      if (blockType === "project") setSelectedProjectId((node.data.entity as ProcessProject).id);
     }
 
-    commit(layoutFlowTree(committedNodes, nextEdges), nextEdges);
+    commit(layoutAfterStructuralChange(committedNodes, nextEdges, mode, selectedProjectId), nextEdges);
     setSelectedNodeId(node.id);
     setSelectedNodeIds([node.id]);
     setSelectedEdgeIds([]);
@@ -439,7 +484,7 @@ export function FlowEditor({
       createFlowEdge(parentId, groupNode.id, `edge-${parentId}-${groupNode.id}`),
     ];
 
-    commit(layoutFlowTree(nextNodes, nextEdges), nextEdges);
+    commit(layoutAfterStructuralChange(nextNodes, nextEdges, mode, selectedProjectId), nextEdges);
     setSelectedNodeId(groupNode.id);
     setSelectedNodeIds([groupNode.id]);
     setSelectedEdgeIds([]);
@@ -470,22 +515,23 @@ export function FlowEditor({
       const childType = group.childType;
       const childNodes = outgoing(layoutNodes, nextEdges, parentNode.id, childType);
       const contextPart = findNearestPart(layoutNodes, nextEdges, parentNode.id) ?? part;
+      const contextProject = findNearestProject(layoutNodes, nextEdges, parentNode.id) ?? project;
       const contextOperations = contextPart ? sortOperationsByNumber(loadOperationsFromStorage(contextPart.id)) : operations;
-      const node = createFlowNode(childType, getNextChildPosition(parentNode, childNodes, layoutNodes), { part: contextPart, project, operations: contextOperations, parentNode, nodes: layoutNodes, edges: nextEdges });
+      const node = createFlowNode(childType, getNextChildPosition(parentNode, childNodes, layoutNodes), { part: contextPart, project: contextProject, operations: contextOperations, parentNode, nodes: layoutNodes, edges: nextEdges });
       const finalEdges = [...nextEdges, createFlowEdge(parentNode.id, node.id)];
       const finalNodes = [...layoutNodes, node];
-      if (mode === "project" && childType === "part") {
+      if ((mode === "project" || mode === "projects") && childType === "part") {
         persistFlowEntities(finalNodes);
         setProjectParts(getActiveProjectParts(loadPartsFromStorage(), project?.id));
       }
-      commit(layoutFlowTree(finalNodes, finalEdges), finalEdges);
+      commit(layoutAfterStructuralChange(finalNodes, finalEdges, mode, selectedProjectId), finalEdges);
       setSelectedNodeId(node.id);
       setSelectedNodeIds([node.id]);
       setSelectedEdgeIds([]);
       return;
     }
 
-    commit(layoutFlowTree(layoutNodes, nextEdges), nextEdges);
+    commit(layoutAfterStructuralChange(layoutNodes, nextEdges, mode, selectedProjectId), nextEdges);
     setSelectedNodeId(parentNode.id);
     setSelectedNodeIds([parentNode.id]);
     setSelectedEdgeIds([]);
@@ -551,7 +597,7 @@ export function FlowEditor({
 
     const selectedEdgeIdSet = new Set(selectedEdgeIds);
     const nextEdges = edges.filter((edge) => !selectedEdgeIdSet.has(edge.id));
-    commit(layoutFlowTree(nodes, nextEdges), nextEdges);
+    commit(layoutAfterStructuralChange(nodes, nextEdges, mode, selectedProjectId), nextEdges);
     setSelectedEdgeIds([]);
     setSelectedNodeId(null);
     setSelectedNodeIds([]);
@@ -572,11 +618,15 @@ export function FlowEditor({
     if (mode === "project") {
       softDeletePartNodes(nodes.filter((node) => deleteIds.has(node.id) && node.data.blockType === "part"));
       setProjectParts(getActiveProjectParts(loadPartsFromStorage(), project?.id));
+    } else if (mode === "projects") {
+      softDeleteProjectNodes(nodes.filter((node) => deleteIds.has(node.id) && node.data.blockType === "project"));
+      softDeletePartNodes(nodes.filter((node) => deleteIds.has(node.id) && node.data.blockType === "part"));
+      setProjects(loadProjectsFromStorage());
     }
 
     const nextNodes = nodes.filter((node) => !deleteIds.has(node.id));
     const nextEdges = edges.filter((edge) => !deleteIds.has(edge.source) && !deleteIds.has(edge.target));
-    commit(layoutFlowTree(nextNodes, nextEdges), nextEdges);
+    commit(layoutAfterStructuralChange(nextNodes, nextEdges, mode, selectedProjectId), nextEdges);
     setSelectedNodeId(null);
     setSelectedNodeIds([]);
     setSelectedEdgeIds([]);
@@ -596,6 +646,35 @@ export function FlowEditor({
       }
     }
     commit(nextNodes, edges);
+  }
+
+  function archiveSelectedProject() {
+    if (!selectedNode || selectedNode.data.blockType !== "project") return;
+    if (!window.confirm("Перенести проект в архив?")) return;
+    const projectEntity = selectedNode.data.entity as ProcessProject;
+    const date = new Date().toLocaleDateString("ru-RU");
+    const nextProjects = loadProjectsFromStorage().map((item) => item.id === projectEntity.id ? { ...item, status: "Архив" as OperationStatus, updatedAt: date } : item);
+    saveProjectsToStorage(nextProjects);
+    setProjects(nextProjects);
+    setSelectedNodeId(null);
+    setSelectedNodeIds([]);
+    setSelectedProjectId(undefined);
+    const synced = syncProjectsFlow({ nodes, edges }, getVisibleProjects(nextProjects, projectsView), loadPartsFromStorage(), undefined, undefined, projectsView);
+    commit(synced.nodes, synced.edges);
+  }
+
+  function restoreSelectedProject() {
+    if (!selectedNode || selectedNode.data.blockType !== "project") return;
+    const projectEntity = selectedNode.data.entity as ProcessProject;
+    const date = new Date().toLocaleDateString("ru-RU");
+    const nextProjects = loadProjectsFromStorage().map((item) => item.id === projectEntity.id ? { ...item, isDeleted: false, deletedAt: null, status: "В работе" as OperationStatus, updatedAt: date } : item);
+    saveProjectsToStorage(nextProjects);
+    setProjects(nextProjects);
+    setSelectedNodeId(null);
+    setSelectedNodeIds([]);
+    setSelectedProjectId(undefined);
+    const synced = syncProjectsFlow({ nodes, edges }, getVisibleProjects(nextProjects, projectsView), loadPartsFromStorage(), undefined, undefined, projectsView);
+    commit(synced.nodes, synced.edges);
   }
 
   function updateSelectedType(blockType: FlowBlockType) {
@@ -618,6 +697,12 @@ export function FlowEditor({
       setProject(loadProjectsFromStorage().find((item) => item.id === projectId) ?? project);
       setProjectParts(getActiveProjectParts(loadPartsFromStorage(), projectId));
       setOperations(getActiveProjectParts(loadPartsFromStorage(), projectId).flatMap((item) => sortOperationsByNumber(loadOperationsFromStorage(item.id))));
+    } else if (mode === "projects") {
+      persistFlowOperationsForNodes(nodes, edges, selectedPartId);
+      const loadedProjects = loadProjectsFromStorage();
+      const loadedParts = loadPartsFromStorage();
+      setProjects(loadedProjects);
+      setOperations(getPartsForProjects(loadedParts, getVisibleProjects(loadedProjects, projectsView), projectsView).flatMap((item) => sortOperationsByNumber(loadOperationsFromStorage(item.id))));
     } else if (partId) {
       persistFlowOperations(partId, nodes, edges);
       setPart(loadPartsFromStorage().find((item) => item.id === partId) ?? part);
@@ -651,12 +736,23 @@ export function FlowEditor({
   }
 
   function autoLayout() {
-    commit(layoutFlowTree(nodes, edges), edges);
+    const nextNodes = mode === "projects" ? layoutProjectsFlowKeepingProjectPositions(nodes, edges, selectedProjectId) : layoutFlowTree(nodes, edges);
+    commit(nextNodes, edges);
     window.setTimeout(() => flowInstanceRef.current?.fitView({ padding: 0.2 }), 0);
   }
 
   function showFullScheme() {
     flowInstanceRef.current?.fitView({ padding: 0.2 });
+  }
+
+  function closePropertiesPanel() {
+    suppressSelectionRef.current = true;
+    setSelectedNodeId(null);
+    setSelectedNodeIds([]);
+    setSelectedEdgeIds([]);
+    window.setTimeout(() => {
+      suppressSelectionRef.current = false;
+    }, 0);
   }
 
   function toggleFullscreen() {
@@ -678,10 +774,12 @@ export function FlowEditor({
     return <div className="rounded-lg border border-slate-200 bg-white p-6 text-sm text-slate-600 shadow-sm">Проект не найден.</div>;
   }
 
-  const backHref = mode === "project" && project ? `/projects/${project.id}` : part ? `/parts/${part.id}` : "/projects";
-  const backLabel = mode === "project" ? "Карточка проекта" : "Карточка детали";
-  const editorTitle = mode === "project" && project ? `${project.code} · ${project.name}` : part ? `${part.code} · ${part.name}` : "";
-  const editorSubtitle = mode === "project"
+  const backHref = mode === "projects" ? "/" : mode === "project" && project ? `/projects/${project.id}` : part ? `/parts/${part.id}` : "/projects";
+  const backLabel = mode === "projects" ? "Главная" : mode === "project" ? "Карточка проекта" : "Карточка детали";
+  const editorTitle = mode === "projects" ? "Проекты" : mode === "project" && project ? `${project.code} · ${project.name}` : part ? `${part.code} · ${part.name}` : "";
+  const editorSubtitle = mode === "projects"
+    ? "Создавайте проекты, детали и техпроцессы прямо на схеме"
+    : mode === "project"
     ? `Проектная схема · деталей: ${projectParts.length}`
     : "Node-based редактор техпроцесса";
 
@@ -694,9 +792,23 @@ export function FlowEditor({
             <div className="font-semibold text-slate-950">{editorTitle}</div>
             <div className="text-xs text-slate-500">{editorSubtitle}</div>
           </div>
-          <button type="button" onClick={() => addBlock()} className="rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white">+ Создать блок</button>
+          <button type="button" onClick={() => addBlock(mode === "projects" ? null : undefined)} className="rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white">{mode === "projects" ? "+ Создать проект" : "+ Создать блок"}</button>
           <button type="button" onClick={autoLayout} className="rounded-md border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700">Автокомпоновка</button>
           <button type="button" onClick={showFullScheme} className="rounded-md border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700">Показать всю схему</button>
+          {mode === "projects" ? (
+            <div className="flex rounded-md border border-slate-200 bg-white p-1">
+              {[
+                ["active", "Активные проекты"],
+                ["archive", "Архив"],
+              ].map(([value, label]) => (
+                <button key={value} type="button" onClick={() => {
+                  setProjectsView(value as ProjectsFlowView);
+                  setSelectedProjectId(undefined);
+                  window.history.replaceState(null, "", value === "archive" ? "/projects?view=archive" : "/projects");
+                }} className={`rounded px-3 py-1.5 text-sm font-semibold ${projectsView === value ? "bg-blue-600 text-white" : "text-slate-600"}`}>{label}</button>
+              ))}
+            </div>
+          ) : null}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {dirty ? <span className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-700">Есть несохранённые изменения</span> : null}
@@ -732,6 +844,16 @@ export function FlowEditor({
               setSelectedNodeId(node.id);
               setSelectedNodeIds([node.id]);
               setSelectedEdgeIds([]);
+              if (mode === "projects" && node.data.blockType === "project") {
+                const nextProjectId = (node.data.entity as ProcessProject).id;
+                setSelectedProjectId((currentId) => {
+                  if (currentId !== nextProjectId) setSelectedPartId(undefined);
+                  return nextProjectId;
+                });
+              }
+              if (mode === "projects" && node.data.blockType === "part") {
+                setSelectedPartId((node.data.entity as ProcessPart).id);
+              }
             }}
             onPaneClick={() => {
               setSelectedNodeId(null);
@@ -739,6 +861,7 @@ export function FlowEditor({
               setSelectedEdgeIds([]);
             }}
             onSelectionChange={({ nodes: selectedNodes, edges: selectedEdges }) => {
+              if (suppressSelectionRef.current) return;
               const nodeIds = selectedNodes.map((node) => node.id);
               const edgeIds = selectedEdges.map((edge) => edge.id);
               const nextSelectedNodeId = nodeIds[0] ?? null;
@@ -776,11 +899,10 @@ export function FlowEditor({
               onTypeChange={updateSelectedType}
               onChange={updateSelectedEntity}
               onDelete={() => deleteBlock()}
-              onClose={() => {
-                setSelectedNodeId(null);
-                setSelectedNodeIds([]);
-                setSelectedEdgeIds([]);
-              }}
+              onArchiveProject={archiveSelectedProject}
+              onRestoreProject={restoreSelectedProject}
+              isArchiveView={projectsView === "archive"}
+              onClose={closePropertiesPanel}
             />
           </div>
         ) : null}
@@ -792,15 +914,20 @@ export function FlowEditor({
 function FlowBlockNode({ id, data, selected }: NodeProps<ProcessFlowNode>) {
   const groupConfig = isGroupType(data.blockType) ? groupConfigByType[data.blockType] : undefined;
   const canAddChild = data.blockType !== "tool_position";
+  const entity = data.entity as Record<string, any>;
+  const isArchivedProject = data.blockType === "project" && (entity.isDeleted || entity.status === "Архив" || entity.status === "Выполнен");
+  const archiveLabel = entity.isDeleted ? "УДАЛЁН" : entity.status === "Выполнен" ? "ВЫПОЛНЕН" : isArchivedProject ? "АРХИВ" : "";
 
   return (
-    <div className={`relative min-w-56 rounded-lg border bg-white p-3 pr-8 shadow-sm ${selected ? "border-blue-500 ring-2 ring-blue-100" : "border-slate-200"}`}>
+    <div className={`relative min-w-56 rounded-lg border p-3 pr-8 shadow-sm ${isArchivedProject ? "bg-slate-50 opacity-90" : "bg-white"} ${selected ? "border-blue-500 ring-2 ring-blue-100" : "border-slate-200"}`}>
       <Handle type="target" position={Position.Left} className="!bg-blue-500" />
       <div className="flex items-start justify-between gap-3">
         <div>
+          {archiveLabel ? <div className="mb-1 inline-flex rounded bg-slate-200 px-2 py-0.5 text-[10px] font-bold text-slate-600">{archiveLabel}</div> : null}
           <div className="text-[11px] font-semibold uppercase tracking-wide text-blue-700">{flowTypeLabels[data.blockType]}</div>
           <div className="mt-1 text-sm font-semibold text-slate-950">{data.title}</div>
           {data.subtitle ? <div className="mt-1 max-w-52 truncate text-xs text-slate-500">{data.subtitle}</div> : null}
+          {data.blockType === "project" ? <div className="mt-1 text-xs font-semibold text-slate-500">Деталей: {entity.partCount ?? 0}</div> : null}
         </div>
         <div className="flex gap-1">
           <button type="button" title="Удалить блок" onClick={(event) => dispatchNodeEvent(event, "tech-flow:delete-node", id)} className="rounded border border-rose-200 px-2 text-xs font-semibold text-rose-700">×</button>
@@ -869,6 +996,9 @@ function PropertiesPanel({
   onTypeChange,
   onChange,
   onDelete,
+  onArchiveProject,
+  onRestoreProject,
+  isArchiveView,
   onClose,
 }: {
   node?: ProcessFlowNode;
@@ -877,6 +1007,9 @@ function PropertiesPanel({
   onTypeChange: (type: FlowBlockType) => void;
   onChange: (patch: Record<string, unknown>) => void;
   onDelete: () => void;
+  onArchiveProject?: () => void;
+  onRestoreProject?: () => void;
+  isArchiveView?: boolean;
   onClose: () => void;
 }) {
   if (!node) {
@@ -893,6 +1026,8 @@ function PropertiesPanel({
           <h3 className="mt-1 text-lg font-semibold text-slate-950">{node.data.title}</h3>
         </div>
         <div className="flex gap-2">
+          {node.data.blockType === "project" && !isArchiveView ? <button type="button" onClick={onArchiveProject} className="rounded-md border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700">В архив</button> : null}
+          {node.data.blockType === "project" && isArchiveView ? <button type="button" onClick={onRestoreProject} className="rounded-md border border-emerald-200 px-3 py-1.5 text-xs font-semibold text-emerald-700">Восстановить</button> : null}
           <button type="button" onClick={onDelete} className="rounded-md border border-rose-200 px-3 py-1.5 text-xs font-semibold text-rose-700">Удалить</button>
           <button type="button" onClick={onClose} className="rounded-md border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600">Закрыть</button>
         </div>
@@ -910,6 +1045,13 @@ function PropertiesPanel({
           <TextField label="Название" value={entity.name} onChange={(value) => onChange({ name: value })} />
           <TextField label="Заказчик" value={entity.customer} onChange={(value) => onChange({ customer: value })} />
           <TextareaField label="Описание" value={entity.description} onChange={(value) => onChange({ description: value })} />
+          <Field label="Степень важности">
+            <select value={entity.priority ?? "normal"} onChange={(event) => onChange({ priority: event.target.value })} className="field">
+              <option value="high">Важный</option>
+              <option value="normal">Обычный</option>
+              <option value="low">Низкий</option>
+            </select>
+          </Field>
           <StatusField value={entity.status} onChange={(value) => onChange({ status: value })} />
         </>
       ) : null}
@@ -1136,6 +1278,64 @@ function buildProjectFlow(project: ProcessProject | undefined, projectParts: Pro
   return { nodes: layoutFlowTree(nodes, edges), edges };
 }
 
+function buildProjectsFlow(projects: ProcessProject[], parts: ProcessPart[], selectedProjectId: string | undefined, selectedPartId: string | undefined, view: ProjectsFlowView): FlowSnapshot {
+  return syncProjectsFlow({ nodes: [], edges: [] }, projects, parts, selectedProjectId, selectedPartId, view);
+}
+
+function syncProjectsFlow(snapshot: FlowSnapshot, projects: ProcessProject[], parts: ProcessPart[], selectedProjectId: string | undefined, selectedPartId: string | undefined, view: ProjectsFlowView): FlowSnapshot {
+  const visibleProjectIds = new Set(projects.map((project) => project.id));
+  const keepIds = new Set<string>();
+  let nodes = snapshot.nodes.filter((node) => {
+    if (node.data.blockType === "project") return visibleProjectIds.has((node.data.entity as ProcessProject).id);
+    return false;
+  });
+  let edges: ProcessFlowEdge[] = [];
+
+  projects.forEach((project, index) => {
+    const projectNodeId = `project-${project.id}`;
+    const projectParts = getProjectPartsForView(parts, project, view);
+    const projectEntity = { ...project, partCount: projectParts.length } as ProcessProject & { partCount: number };
+    const existing = nodes.find((node) => node.id === projectNodeId);
+    const projectNode = existing
+      ? refreshNode({ ...existing, hidden: false, data: { ...existing.data, blockType: "project", entity: projectEntity } })
+      : createFlowNode("project", { x: 40, y: 80 + index * VERTICAL_SPACING }, { entity: projectEntity });
+    nodes = [...nodes.filter((node) => node.id !== projectNodeId), projectNode];
+    keepIds.add(projectNodeId);
+
+    if (selectedProjectId !== project.id) return;
+
+    const expandedParts = selectedPartId ? projectParts.filter((part) => part.id === selectedPartId) : [];
+    const operationsByPart = getOperationsByPart(expandedParts);
+    const branch = buildProjectFlow(project, projectParts, operationsByPart);
+    const branchProjectNode = branch.nodes.find((node) => node.id === projectNodeId);
+    const offsetX = projectNode.position.x - (branchProjectNode?.position.x ?? projectNode.position.x);
+    const offsetY = projectNode.position.y - (branchProjectNode?.position.y ?? projectNode.position.y);
+    branch.nodes.forEach((branchNode) => {
+      if (branchNode.id === projectNodeId) return;
+      nodes = [
+        ...nodes.filter((node) => node.id !== branchNode.id),
+        {
+          ...branchNode,
+          position: {
+            x: branchNode.position.x + offsetX,
+            y: branchNode.position.y + offsetY,
+          },
+        },
+      ];
+      keepIds.add(branchNode.id);
+    });
+    branch.edges.forEach((edge) => {
+      edges = [...edges.filter((item) => item.id !== edge.id), edge];
+    });
+  });
+
+  nodes = nodes.filter((node) => keepIds.has(node.id));
+  return {
+    nodes,
+    edges,
+  };
+}
+
 function syncProjectFlow(snapshot: FlowSnapshot, project: ProcessProject, projectParts: ProcessPart[], operationsByPart: Map<string, ProcessOperation[]>): FlowSnapshot {
   const activePartIds = new Set(projectParts.map((part) => part.id));
   const removedPartNodeIds = snapshot.nodes
@@ -1183,6 +1383,63 @@ function syncProjectFlow(snapshot: FlowSnapshot, project: ProcessProject, projec
   return { nodes: layoutFlowTree(nodes, edges), edges };
 }
 
+function layoutProjectsFlowKeepingProjectPositions(nodes: ProcessFlowNode[], edges: ProcessFlowEdge[], selectedProjectId: string | undefined) {
+  if (!selectedProjectId) return nodes;
+
+  const selectedProjectNodeId = `project-${selectedProjectId}`;
+  const selectedProject = nodes.find((node) => node.id === selectedProjectNodeId);
+  if (!selectedProject) return nodes;
+
+  const projectPositions = new Map(
+    nodes
+      .filter((node) => node.data.blockType === "project")
+      .map((node) => [node.id, node.position]),
+  );
+  const branchIds = new Set([selectedProjectNodeId, ...collectAllDescendantIds(nodes, edges, selectedProjectNodeId)]);
+  const branchNodes = nodes.filter((node) => branchIds.has(node.id));
+  const branchEdges = edges.filter((edge) => branchIds.has(edge.source) && branchIds.has(edge.target));
+  const laidOutBranch = layoutFlowTree(branchNodes, branchEdges);
+  const laidOutProject = laidOutBranch.find((node) => node.id === selectedProjectNodeId);
+  const offsetX = selectedProject.position.x - (laidOutProject?.position.x ?? selectedProject.position.x);
+  const offsetY = selectedProject.position.y - (laidOutProject?.position.y ?? selectedProject.position.y);
+  const branchById = new Map(
+    laidOutBranch.map((node) => [
+      node.id,
+      {
+        ...node,
+        position: {
+          x: node.position.x + offsetX,
+          y: node.position.y + offsetY,
+        },
+      },
+    ]),
+  );
+
+  return nodes.map((node) => {
+    if (node.data.blockType === "project") {
+      return { ...node, position: projectPositions.get(node.id) ?? node.position };
+    }
+
+    return branchById.get(node.id) ?? node;
+  });
+}
+
+function layoutAfterStructuralChange(nodes: ProcessFlowNode[], edges: ProcessFlowEdge[], mode: FlowEditorMode, selectedProjectId: string | undefined) {
+  return mode === "projects" ? layoutProjectsFlowKeepingProjectPositions(nodes, edges, selectedProjectId) : layoutFlowTree(nodes, edges);
+}
+
+function selectionIdForSyncedFlow(nodes: ProcessFlowNode[], mode: FlowEditorMode, selectedProjectId: string | undefined, selectedPartId: string | undefined) {
+  const preferredId = mode === "projects"
+    ? selectedPartId ? `part-${selectedPartId}` : selectedProjectId ? `project-${selectedProjectId}` : undefined
+    : undefined;
+
+  if (preferredId && nodes.some((node) => node.id === preferredId)) {
+    return preferredId;
+  }
+
+  return nodes[0]?.id ?? null;
+}
+
 function createFlowNode(
   blockType: FlowBlockType,
   position: { x: number; y: number },
@@ -1205,6 +1462,8 @@ function createFlowNode(
     targetPosition: Position.Left,
     data: {
       blockType,
+      entityType: isGroupType(blockType) ? "group" : blockType,
+      entityId: (entity as { id?: string }).id,
       title: flowTypeLabels[blockType],
       entity,
     },
@@ -1230,6 +1489,7 @@ function defaultEntity(blockType: FlowBlockType, context: { part?: ProcessPart; 
       name: "Новый проект",
       customer: "",
       description: "",
+      priority: "normal",
       status: "Черновик",
       isDeleted: false,
       deletedAt: null,
@@ -1290,7 +1550,7 @@ function defaultEntity(blockType: FlowBlockType, context: { part?: ProcessPart; 
 }
 
 function describeNode(blockType: FlowBlockType, entity: Record<string, any>) {
-  if (blockType === "project") return { title: entity.name || "Новый проект", subtitle: entity.code || "Код не задан" };
+  if (blockType === "project") return { title: entity.name || "Новый проект", subtitle: `${entity.customer || "Заказчик не задан"} · ${priorityLabel(entity.priority)}` };
   if (blockType === "part") return { title: entity.name || "Новая деталь", subtitle: entity.code || "Код не задан" };
   if (blockType === "operation") {
     const machine = entity.machineSource === "catalog" ? machineName(entity.machineId) : entity.machineSource === "manual" ? entity.machineManualText : "Требуется подобрать";
@@ -1328,6 +1588,12 @@ function nodeColor(blockType: FlowBlockType) {
   if (blockType === "tool_position") return "#ea580c";
   if (blockType === "tool_position_group") return "#c2410c";
   return "#64748b";
+}
+
+function priorityLabel(priority?: string) {
+  if (priority === "high") return "Важный";
+  if (priority === "low") return "Низкий";
+  return "Обычный";
 }
 
 function isGroupType(blockType: FlowBlockType | undefined): blockType is GroupBlockType {
@@ -1686,11 +1952,15 @@ function persistFlowOperations(partId: string, nodes: ProcessFlowNode[], edges: 
   saveOperationsToStorage(partId, sortOperationsByNumber(nextOperations));
 }
 
-function persistFlowOperationsForNodes(nodes: ProcessFlowNode[], edges: ProcessFlowEdge[]) {
+function persistFlowOperationsForNodes(nodes: ProcessFlowNode[], edges: ProcessFlowEdge[], onlyPartId?: string) {
   const partNodes = nodes.filter((node) => node.data.blockType === "part" && !node.hidden);
   partNodes.forEach((partNode) => {
     const part = partNode.data.entity as ProcessPart;
+    if (onlyPartId && part.id !== onlyPartId) return;
+
     const operationNodes = outgoing(nodes, edges, partNode.id, "operation");
+    if (!onlyPartId && !operationNodes.length) return;
+
     const operationIds = new Set(operationNodes.map((node) => node.id));
     const scopedNodes = nodes.filter((node) => node.id === partNode.id || operationIds.has(node.id) || [...operationIds].some((operationId) => collectAllDescendantIds(nodes, edges, operationId).includes(node.id)));
     persistFlowOperations(part.id, scopedNodes, edges);
@@ -1698,7 +1968,10 @@ function persistFlowOperationsForNodes(nodes: ProcessFlowNode[], edges: ProcessF
 }
 
 function persistFlowEntities(nodes: ProcessFlowNode[]) {
-  const projectNodes = nodes.filter((node) => node.data.blockType === "project").map((node) => node.data.entity as ProcessProject);
+  const projectNodes = nodes.filter((node) => node.data.blockType === "project").map((node) => {
+    const { partCount, ...project } = node.data.entity as ProcessProject & { partCount?: number };
+    return project;
+  });
   const partNodes = nodes.filter((node) => node.data.blockType === "part").map((node) => node.data.entity as ProcessPart);
 
   if (projectNodes.length) {
@@ -1730,6 +2003,32 @@ function getActiveProjectParts(parts: ProcessPart[], projectId?: string) {
   );
 }
 
+function getVisibleProjects(projects: ProcessProject[], view: ProjectsFlowView) {
+  return projects.filter((project) => {
+    const archived = project.isDeleted || project.status === "Архив" || project.status === "Выполнен";
+    return view === "archive" ? archived : !archived;
+  }).sort(compareProjectsByPriority);
+}
+
+function compareProjectsByPriority(first: ProcessProject, second: ProcessProject) {
+  const weight: Record<string, number> = { high: 0, normal: 1, low: 2 };
+  const priorityDiff = (weight[first.priority ?? "normal"] ?? 1) - (weight[second.priority ?? "normal"] ?? 1);
+  if (priorityDiff) return priorityDiff;
+  return first.name.localeCompare(second.name, "ru");
+}
+
+function getProjectPartsForView(parts: ProcessPart[], project: ProcessProject, view: ProjectsFlowView) {
+  if (view === "archive") {
+    return parts.filter((part) => part.projectId === project.id);
+  }
+
+  return getActiveProjectParts(parts, project.id);
+}
+
+function getPartsForProjects(parts: ProcessPart[], projects: ProcessProject[], view: ProjectsFlowView) {
+  return projects.flatMap((project) => getProjectPartsForView(parts, project, view));
+}
+
 function getOperationsByPart(parts: ProcessPart[]) {
   return new Map(parts.map((part) => [part.id, sortOperationsByNumber(loadOperationsFromStorage(part.id))]));
 }
@@ -1744,6 +2043,16 @@ function findNearestPart(nodes: ProcessFlowNode[], edges: ProcessFlowEdge[], nod
   return findNearestPart(nodes, edges, incomingEdge.source);
 }
 
+function findNearestProject(nodes: ProcessFlowNode[], edges: ProcessFlowEdge[], nodeId: string): ProcessProject | undefined {
+  const node = nodes.find((item) => item.id === nodeId);
+  if (node?.data.blockType === "project") return node.data.entity as ProcessProject;
+
+  const incomingEdge = edges.find((edge) => edge.target === nodeId);
+  if (!incomingEdge) return undefined;
+
+  return findNearestProject(nodes, edges, incomingEdge.source);
+}
+
 function softDeletePartNodes(partNodes: ProcessFlowNode[]) {
   if (!partNodes.length) return;
 
@@ -1751,6 +2060,16 @@ function softDeletePartNodes(partNodes: ProcessFlowNode[]) {
   const date = new Date().toLocaleDateString("ru-RU");
   savePartsToStorage(loadPartsFromStorage().map((part) =>
     partIds.has(part.id) ? { ...part, isDeleted: true, deletedAt: date, updatedAt: date } : part,
+  ));
+}
+
+function softDeleteProjectNodes(projectNodes: ProcessFlowNode[]) {
+  if (!projectNodes.length) return;
+
+  const projectIds = new Set(projectNodes.map((node) => (node.data.entity as ProcessProject).id));
+  const date = new Date().toLocaleDateString("ru-RU");
+  saveProjectsToStorage(loadProjectsFromStorage().map((project) =>
+    projectIds.has(project.id) ? { ...project, isDeleted: true, deletedAt: date, updatedAt: date } : project,
   ));
 }
 

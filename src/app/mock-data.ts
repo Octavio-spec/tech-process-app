@@ -7,6 +7,7 @@ export type Project = {
   name: string;
   customer?: string;
   description?: string;
+  priority?: "low" | "normal" | "high";
   status: OperationStatus;
   isDeleted: boolean;
   deletedAt?: string | null;
@@ -163,6 +164,7 @@ export const projects: Project[] = [
     name: "Редуктор Р-120",
     customer: "ООО Привод",
     description: "Комплект деталей редуктора для запуска технологической подготовки.",
+    priority: "high",
     status: "В работе",
     isDeleted: false,
     deletedAt: null,
@@ -175,6 +177,7 @@ export const projects: Project[] = [
     name: "Приводная группа",
     customer: "Завод Механика",
     description: "Детали приводного узла и кронштейнов.",
+    priority: "normal",
     status: "Черновик",
     isDeleted: false,
     deletedAt: null,
@@ -187,6 +190,7 @@ export const projects: Project[] = [
     name: "Архивная оснастка",
     customer: "Внутренний проект",
     description: "Архивные детали для проверки сценариев восстановления.",
+    priority: "low",
     status: "Архив",
     isDeleted: false,
     deletedAt: null,
@@ -199,6 +203,7 @@ export const projects: Project[] = [
     name: "Удалённый проект",
     customer: "Тестовый заказчик",
     description: "Проект скрыт через soft delete для проверки восстановления.",
+    priority: "low",
     status: "Черновик",
     isDeleted: true,
     deletedAt: "04.05.2026",

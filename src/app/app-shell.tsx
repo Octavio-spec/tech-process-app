@@ -10,14 +10,14 @@ const navItems = [
   { href: "/projects", label: "Проекты", icon: Briefcase },
   { href: "/parts", label: "Детали", icon: Box },
   { href: "/database", label: "База данных", icon: Database },
-  { href: "/archive", label: "Архив", icon: Archive },
+  { href: "/projects?view=archive", label: "Архив", icon: Archive },
   { href: "/reports", label: "Отчёты", icon: FileText },
   { href: "/settings", label: "Настройки", icon: Settings },
 ];
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
-  const isFlowEditor = pathname.includes("/flow");
+  const isFlowEditor = pathname.includes("/flow") || pathname === "/projects";
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(isFlowEditor);
 
   useEffect(() => {

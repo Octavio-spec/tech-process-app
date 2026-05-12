@@ -1,5 +1,5 @@
-import { ArchiveClient } from "./archive-client";
+import { redirect } from "next/navigation";
 
 export default function ArchivePage() {
-  return <ArchiveClient />;
+  redirect("/projects?view=archive");
 }
