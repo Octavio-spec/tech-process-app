@@ -19,6 +19,7 @@ import {
   type Node,
   type NodeChange,
   type NodeProps,
+  type ReactFlowInstance,
 } from "@xyflow/react";
 import {
   cellName,
@@ -45,6 +46,7 @@ import {
   type ResourceSource,
   type ToolPosition,
 } from "../../../process-model";
+import { FLOW_CONTROLS_STORAGE_KEY, parseFlowControls, type FlowWheelMode } from "../../../flow-controls";
 import { holders, machineCells, machines, tools } from "../../../mock-data";
 import { StatusBadge } from "../../../ui";
 
@@ -135,12 +137,17 @@ export function FlowEditor({ partId, projectId, initialPart }: { partId: string;
   const [nodes, setNodes] = useState<ProcessFlowNode[]>([]);
   const [edges, setEdges] = useState<ProcessFlowEdge[]>([]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
+  const [selectedEdgeIds, setSelectedEdgeIds] = useState<string[]>([]);
   const [message, setMessage] = useState("");
   const [dirty, setDirty] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [wheelMode, setWheelMode] = useState<FlowWheelMode>("pan");
   const [past, setPast] = useState<FlowSnapshot[]>([]);
   const [future, setFuture] = useState<FlowSnapshot[]>([]);
   const editorRef = useRef<HTMLDivElement | null>(null);
+  const flowCanvasRef = useRef<HTMLDivElement | null>(null);
+  const flowInstanceRef = useRef<ReactFlowInstance<ProcessFlowNode, ProcessFlowEdge> | null>(null);
 
   const storageKey = `tech-process:flow:${partId}`;
   const selectedNode = useMemo(() => nodes.find((node) => node.id === selectedNodeId), [nodes, selectedNodeId]);
@@ -175,6 +182,8 @@ export function FlowEditor({ partId, projectId, initialPart }: { partId: string;
         setNodes((parsed.nodes ?? []).map(normalizeFlowNode));
         setEdges((parsed.edges ?? []).map(normalizeFlowEdge));
         setSelectedNodeId(parsed.nodes?.[0]?.id ?? null);
+        setSelectedNodeIds(parsed.nodes?.[0]?.id ? [parsed.nodes[0].id] : []);
+        setSelectedEdgeIds([]);
         return;
       } catch {
         window.localStorage.removeItem(storageKey);
@@ -185,12 +194,51 @@ export function FlowEditor({ partId, projectId, initialPart }: { partId: string;
     setNodes(initial.nodes);
     setEdges(initial.edges);
     setSelectedNodeId(initial.nodes[0]?.id ?? null);
+    setSelectedNodeIds(initial.nodes[0]?.id ? [initial.nodes[0].id] : []);
+    setSelectedEdgeIds([]);
   }, [initialPart, partId, projectId, storageKey]);
+
+  useEffect(() => {
+    function loadFlowControls() {
+      setWheelMode(parseFlowControls(window.localStorage.getItem(FLOW_CONTROLS_STORAGE_KEY)).wheelMode);
+    }
+
+    loadFlowControls();
+    window.addEventListener("storage", loadFlowControls);
+    return () => window.removeEventListener("storage", loadFlowControls);
+  }, []);
+
+  useEffect(() => {
+    const canvas = flowCanvasRef.current;
+    if (!canvas) return;
+
+    function handleWheel(event: WheelEvent) {
+      if (wheelMode !== "zoom" || !event.ctrlKey) return;
+
+      const instance = flowInstanceRef.current;
+      if (!instance) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+
+      const viewport = instance.getViewport();
+      instance.setViewport({
+        ...viewport,
+        y: viewport.y - event.deltaY,
+      });
+    }
+
+    canvas.addEventListener("wheel", handleWheel, { passive: false, capture: true });
+    return () => canvas.removeEventListener("wheel", handleWheel, { capture: true });
+  }, [wheelMode]);
 
   useEffect(() => {
     function addChild(event: Event) {
       const id = (event as CustomEvent<string>).detail;
       setSelectedNodeId(id);
+      setSelectedNodeIds([id]);
+      setSelectedEdgeIds([]);
       addBlock(id);
     }
 
@@ -220,17 +268,18 @@ export function FlowEditor({ partId, projectId, initialPart }: { partId: string;
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
-      if ((event.key === "Delete" || event.key === "Backspace") && selectedNodeId) {
-        const target = event.target as HTMLElement | null;
-        if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.tagName === "SELECT") return;
+      if (event.key === "Delete" || event.key === "Backspace") {
+        if (isTextEditingTarget(event.target as HTMLElement | null)) return;
+        if (!selectedNodeIds.length && !selectedEdgeIds.length) return;
+
         event.preventDefault();
-        deleteBlock(selectedNodeId);
+        deleteSelection();
       }
     }
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  });
+  }, [selectedEdgeIds, selectedNodeIds, nodes, edges]);
 
   function onNodesChange(changes: NodeChange<ProcessFlowNode>[]) {
     setNodes((currentNodes) => {
@@ -301,6 +350,8 @@ export function FlowEditor({ partId, projectId, initialPart }: { partId: string;
 
     commit(layoutFlowTree([...nodes, node], nextEdges), nextEdges);
     setSelectedNodeId(node.id);
+    setSelectedNodeIds([node.id]);
+    setSelectedEdgeIds([]);
   }
 
   function collapseChildGroup(parentId: string) {
@@ -352,6 +403,8 @@ export function FlowEditor({ partId, projectId, initialPart }: { partId: string;
 
     commit(layoutFlowTree(nextNodes, nextEdges), nextEdges);
     setSelectedNodeId(groupNode.id);
+    setSelectedNodeIds([groupNode.id]);
+    setSelectedEdgeIds([]);
   }
 
   function expandChildGroup(groupId: string, addChildAfter = false) {
@@ -382,28 +435,101 @@ export function FlowEditor({ partId, projectId, initialPart }: { partId: string;
       const finalEdges = [...nextEdges, createFlowEdge(parentNode.id, node.id)];
       commit(layoutFlowTree([...layoutNodes, node], finalEdges), finalEdges);
       setSelectedNodeId(node.id);
+      setSelectedNodeIds([node.id]);
+      setSelectedEdgeIds([]);
       return;
     }
 
     commit(layoutFlowTree(layoutNodes, nextEdges), nextEdges);
     setSelectedNodeId(parentNode.id);
+    setSelectedNodeIds([parentNode.id]);
+    setSelectedEdgeIds([]);
   }
 
   function deleteBlock(nodeId = selectedNodeId) {
     if (!nodeId) return;
-    const node = nodes.find((item) => item.id === nodeId);
-    if (isGroupType(node?.data.blockType)) {
-      expandChildGroup(nodeId);
+    deleteNodesAndEdges(new Set([nodeId]));
+  }
+
+  function getSelectedNodeIds() {
+    return selectedNodeIds.length ? selectedNodeIds : selectedNodeId ? [selectedNodeId] : [];
+  }
+
+  function getDescendantNodeIds(nodeIds: Iterable<string>) {
+    const descendants = new Set<string>();
+    const queue = [...nodeIds];
+
+    while (queue.length) {
+      const nodeId = queue.shift();
+      if (!nodeId) continue;
+
+      const node = nodes.find((item) => item.id === nodeId);
+      if (node && isGroupType(node.data.blockType)) {
+        const group = node.data.entity as CollapsedGroupEntity;
+        [...group.groupedNodeIds, ...group.groupedDescendantIds].forEach((groupedId) => {
+          if (!descendants.has(groupedId)) {
+            descendants.add(groupedId);
+            queue.push(groupedId);
+          }
+        });
+      }
+
+      collectAllDescendantIds(nodes, edges, nodeId).forEach((descendantId) => {
+        if (!descendants.has(descendantId)) {
+          descendants.add(descendantId);
+          queue.push(descendantId);
+        }
+      });
+    }
+
+    return descendants;
+  }
+
+  function getNodesToDelete(selectedIds: Iterable<string>) {
+    const deleteIds = new Set(selectedIds);
+    getDescendantNodeIds(deleteIds).forEach((nodeId) => deleteIds.add(nodeId));
+    return deleteIds;
+  }
+
+  function deleteSelection() {
+    const nodeIds = getSelectedNodeIds();
+
+    if (nodeIds.length) {
+      deleteNodesAndEdges(new Set(nodeIds));
       return;
     }
-    const descendantIds = collectAllDescendantIds(nodes, edges, nodeId);
-    const deleteIds = new Set([nodeId, ...descendantIds]);
-    const message = descendantIds.length ? "Удалить блок и все дочерние элементы?" : "Удалить блок со схемы?";
+
+    if (!selectedEdgeIds.length) return;
+
+    const message = selectedEdgeIds.length > 1 ? "Удалить выбранные связи?" : "Удалить выбранную связь?";
     if (!window.confirm(message)) return;
+
+    const selectedEdgeIdSet = new Set(selectedEdgeIds);
+    const nextEdges = edges.filter((edge) => !selectedEdgeIdSet.has(edge.id));
+    commit(layoutFlowTree(nodes, nextEdges), nextEdges);
+    setSelectedEdgeIds([]);
+    setSelectedNodeId(null);
+    setSelectedNodeIds([]);
+  }
+
+  function deleteNodesAndEdges(selectedIds: Set<string>) {
+    if (!selectedIds.size) return;
+
+    const deleteIds = getNodesToDelete(selectedIds);
+    const removedEdges = edges.filter((edge) => deleteIds.has(edge.source) || deleteIds.has(edge.target));
+    const childCount = [...deleteIds].filter((nodeId) => !selectedIds.has(nodeId)).length;
+    const confirmText = selectedIds.size > 1 || childCount > 0
+      ? `Удалить выбранные блоки?\n\nБудет удалено:\n- выбранных блоков: ${selectedIds.size}\n- дочерних блоков: ${childCount}\n- связей: ${removedEdges.length}\n\nПродолжить?`
+      : "Удалить блок со схемы?";
+
+    if (!window.confirm(confirmText)) return;
+
     const nextNodes = nodes.filter((node) => !deleteIds.has(node.id));
     const nextEdges = edges.filter((edge) => !deleteIds.has(edge.source) && !deleteIds.has(edge.target));
     commit(layoutFlowTree(nextNodes, nextEdges), nextEdges);
     setSelectedNodeId(null);
+    setSelectedNodeIds([]);
+    setSelectedEdgeIds([]);
   }
 
   function updateSelectedEntity(patch: Record<string, unknown>) {
@@ -494,6 +620,12 @@ export function FlowEditor({ partId, projectId, initialPart }: { partId: string;
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {dirty ? <span className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-700">Есть несохранённые изменения</span> : null}
+          <span className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-semibold text-slate-600">
+            Колесо: {wheelMode === "pan" ? "движение" : "масштаб"}
+          </span>
+          <Link href="/settings" className="rounded-md border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700">
+            Настройки управления
+          </Link>
           <button type="button" onClick={undo} disabled={!past.length} className="rounded-md border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-40">Undo</button>
           <button type="button" onClick={redo} disabled={!future.length} className="rounded-md border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-40">Redo</button>
           <button type="button" onClick={saveFlow} className="rounded-md bg-emerald-600 px-3 py-2 text-sm font-semibold text-white">Сохранить</button>
@@ -503,24 +635,44 @@ export function FlowEditor({ partId, projectId, initialPart }: { partId: string;
 
       {message ? <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-700">{message}</div> : null}
 
-      <div className="relative min-h-0 flex-1">
+      <div ref={flowCanvasRef} className="relative min-h-0 flex-1">
         <section className="absolute inset-0 overflow-hidden bg-white">
           <ReactFlow
             nodes={displayNodes}
             edges={displayEdges}
-            nodeTypes={{ processBlock: FlowBlockNode }}
+            nodeTypes={processNodeTypes}
+            onInit={(instance) => {
+              flowInstanceRef.current = instance;
+            }}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
-            onNodeClick={(_, node) => setSelectedNodeId(node.id)}
-            onPaneClick={() => setSelectedNodeId(null)}
-            onSelectionChange={({ nodes: selectedNodes }) => setSelectedNodeId(selectedNodes[0]?.id ?? null)}
+            onNodeClick={(_, node) => {
+              setSelectedNodeId(node.id);
+              setSelectedNodeIds([node.id]);
+              setSelectedEdgeIds([]);
+            }}
+            onPaneClick={() => {
+              setSelectedNodeId(null);
+              setSelectedNodeIds([]);
+              setSelectedEdgeIds([]);
+            }}
+            onSelectionChange={({ nodes: selectedNodes, edges: selectedEdges }) => {
+              const nodeIds = selectedNodes.map((node) => node.id);
+              const edgeIds = selectedEdges.map((edge) => edge.id);
+              const nextSelectedNodeId = nodeIds[0] ?? null;
+
+              setSelectedNodeIds((currentIds) => areSameIds(currentIds, nodeIds) ? currentIds : nodeIds);
+              setSelectedEdgeIds((currentIds) => areSameIds(currentIds, edgeIds) ? currentIds : edgeIds);
+              setSelectedNodeId((currentId) => currentId === nextSelectedNodeId ? currentId : nextSelectedNodeId);
+            }}
             panOnDrag={[1]}
             selectionOnDrag
             nodesDraggable
             elementsSelectable
-            panOnScroll
-            zoomOnScroll={false}
+            deleteKeyCode={null}
+            panOnScroll={wheelMode === "pan"}
+            zoomOnScroll={wheelMode === "zoom"}
             zoomOnPinch
             zoomOnDoubleClick={false}
             preventScrolling
@@ -541,7 +693,11 @@ export function FlowEditor({ partId, projectId, initialPart }: { partId: string;
               onTypeChange={updateSelectedType}
               onChange={updateSelectedEntity}
               onDelete={() => deleteBlock()}
-              onClose={() => setSelectedNodeId(null)}
+              onClose={() => {
+                setSelectedNodeId(null);
+                setSelectedNodeIds([]);
+                setSelectedEdgeIds([]);
+              }}
             />
           </div>
         ) : null}
@@ -600,9 +756,27 @@ function FlowBlockNode({ id, data, selected }: NodeProps<ProcessFlowNode>) {
   );
 }
 
+const processNodeTypes = { processBlock: FlowBlockNode };
+
 function dispatchNodeEvent(event: MouseEvent, name: string, id: string) {
   event.stopPropagation();
   window.dispatchEvent(new CustomEvent(name, { detail: id }));
+}
+
+function areSameIds(first: string[], second: string[]) {
+  return first.length === second.length && first.every((id, index) => id === second[index]);
+}
+
+function isTextEditingTarget(target: HTMLElement | null) {
+  if (!target) return false;
+  const tagName = target.tagName;
+  return (
+    tagName === "INPUT" ||
+    tagName === "TEXTAREA" ||
+    tagName === "SELECT" ||
+    target.isContentEditable ||
+    Boolean(target.closest("[contenteditable='true']"))
+  );
 }
 
 function PropertiesPanel({
