@@ -1,3 +1,5 @@
+"use client";
+
 import Link from "next/link";
 import { Archive, Database } from "lucide-react";
 import type { ReactNode } from "react";

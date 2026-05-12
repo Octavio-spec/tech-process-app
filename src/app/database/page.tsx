@@ -1,3 +1,5 @@
+"use client";
+
 import Link from "next/link";
 import { Database, Hammer, Layers, PackageCheck, Wrench } from "lucide-react";
 import { PageHeader } from "../ui";
