@@ -104,6 +104,7 @@ export function ProjectsClient() {
           project.updatedAt,
           <div key={`${project.id}-actions`} className="flex flex-wrap gap-2">
             <Link href={`/projects/${project.id}`} className="text-sm font-semibold text-blue-700">Открыть</Link>
+            <Link href={`/projects/${project.id}/flow`} className="text-sm font-semibold text-blue-700">Схема</Link>
             <button type="button" onClick={() => setEditingProjectId(project.id)} className="text-sm font-semibold text-blue-700">Редактировать</button>
             {filter !== "deleted" ? <button type="button" onClick={() => deleteProject(project.id)} className="text-sm font-semibold text-rose-700">Удалить проект</button> : null}
             {filter === "deleted" ? <button type="button" onClick={() => restoreProject(project.id)} className="text-sm font-semibold text-emerald-700">Восстановить</button> : null}

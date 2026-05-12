@@ -111,6 +111,7 @@ export function ProjectDetailClient({ projectId }: { projectId: string }) {
       </section>
 
       <div className="flex flex-wrap items-center gap-2">
+        <Link href={`/projects/${project.id}/flow`} className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white">Схема проекта</Link>
         <button type="button" onClick={() => setIsProjectFormOpen(true)} className="rounded-md border border-blue-200 bg-white px-4 py-2 text-sm font-semibold text-blue-700">Редактировать проект</button>
         <button type="button" onClick={() => setIsFormOpen(true)} className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white">+ Добавить деталь</button>
         {[
@@ -149,7 +150,7 @@ export function ProjectDetailClient({ projectId }: { projectId: string }) {
           <div key={`${part.id}-actions`} className="flex flex-wrap gap-2">
             <Link href={`/parts/${part.id}`} className="text-sm font-semibold text-blue-700">Открыть</Link>
             <button type="button" onClick={() => setEditingPartId(part.id)} className="text-sm font-semibold text-blue-700">Редактировать</button>
-            <Link href={`/parts/${part.id}/flow`} className="text-sm font-semibold text-blue-700">Техпроцесс</Link>
+            <Link href={`/projects/${project.id}/flow`} className="text-sm font-semibold text-blue-700">Техпроцесс</Link>
             {filter !== "deleted" ? <button type="button" onClick={() => archivePart(part.id)} className="text-sm font-semibold text-slate-600">Архивировать</button> : null}
             {filter !== "deleted" ? <button type="button" onClick={() => deletePart(part.id)} className="text-sm font-semibold text-rose-700">Удалить</button> : null}
             {filter === "deleted" ? <button type="button" onClick={() => restorePart(part.id)} className="text-sm font-semibold text-emerald-700">Восстановить</button> : null}

@@ -86,7 +86,7 @@ export function PartsClient() {
           <div key={`${part.id}-actions`} className="flex flex-wrap gap-2">
             <Link href={`/parts/${part.id}`} className="text-sm font-semibold text-blue-700">Открыть</Link>
             <button type="button" onClick={() => setEditingPartId(part.id)} className="text-sm font-semibold text-blue-700">Редактировать</button>
-            <Link href={`/parts/${part.id}/flow`} className="text-sm font-semibold text-blue-700">Техпроцесс</Link>
+            <Link href={`/projects/${part.projectId}/flow`} className="text-sm font-semibold text-blue-700">Техпроцесс</Link>
           </div>,
         ])}
       />
