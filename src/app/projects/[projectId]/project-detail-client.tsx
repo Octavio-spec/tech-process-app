@@ -35,8 +35,8 @@ export function ProjectDetailClient({ projectId }: { projectId: string }) {
   const projectParts = useMemo(() => parts.filter((part) => part.projectId === projectId), [parts, projectId]);
   const visibleParts = projectParts.filter((part) => {
     if (filter === "deleted") return part.isDeleted;
-    if (filter === "archive") return !part.isDeleted && part.status === "Архив";
-    return !part.isDeleted && part.status !== "Архив";
+    if (filter === "archive") return !part.isDeleted && (part.status === "Архив" || part.status === "Выполнена");
+    return !part.isDeleted && part.status !== "Архив" && part.status !== "Выполнена";
   });
 
   function persistParts(nextParts: ProcessPart[]) {
@@ -149,7 +149,7 @@ export function ProjectDetailClient({ projectId }: { projectId: string }) {
           <div key={`${part.id}-actions`} className="flex flex-wrap gap-2">
             <Link href={`/parts/${part.id}`} className="text-sm font-semibold text-blue-700">Открыть</Link>
             <button type="button" onClick={() => setEditingPartId(part.id)} className="text-sm font-semibold text-blue-700">Редактировать</button>
-            <Link href={`/parts/${part.id}/process`} className="text-sm font-semibold text-blue-700">Техпроцесс</Link>
+            <Link href={`/parts/${part.id}/flow`} className="text-sm font-semibold text-blue-700">Техпроцесс</Link>
             {filter !== "deleted" ? <button type="button" onClick={() => archivePart(part.id)} className="text-sm font-semibold text-slate-600">Архивировать</button> : null}
             {filter !== "deleted" ? <button type="button" onClick={() => deletePart(part.id)} className="text-sm font-semibold text-rose-700">Удалить</button> : null}
             {filter === "deleted" ? <button type="button" onClick={() => restorePart(part.id)} className="text-sm font-semibold text-emerald-700">Восстановить</button> : null}

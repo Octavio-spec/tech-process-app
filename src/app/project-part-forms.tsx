@@ -4,7 +4,8 @@ import { useState, type ReactNode } from "react";
 import type { OperationStatus } from "./mock-data";
 import type { ProcessPart, ProcessProject } from "./process-model";
 
-const statuses: OperationStatus[] = ["Черновик", "В работе", "Требует уточнения", "Готово", "Архив"];
+const projectStatuses: OperationStatus[] = ["Черновик", "В работе", "Выполнен", "Архив"];
+const partStatuses: OperationStatus[] = ["Черновик", "В работе", "Выполнена", "Архив"];
 
 export function ProjectForm({ mode, project, projects, onSubmit, onCancel }: {
   mode: "create" | "edit";
@@ -58,7 +59,7 @@ export function ProjectForm({ mode, project, projects, onSubmit, onCancel }: {
         <Field label="Код проекта"><Input value={code} onChange={setCode} /></Field>
         <Field label="Название"><Input value={name} onChange={setName} /></Field>
         <Field label="Заказчик"><Input value={customer} onChange={setCustomer} /></Field>
-        <Field label="Статус"><Select value={status} onChange={(value) => setStatus(value as OperationStatus)} options={statuses} /></Field>
+        <Field label="Статус"><Select value={status} onChange={(value) => setStatus(value as OperationStatus)} options={projectStatuses} /></Field>
         <Field label="Описание" wide><Textarea value={description} onChange={setDescription} rows={3} /></Field>
       </div>
       <FormActions onSubmit={submit} onCancel={onCancel} />
@@ -132,7 +133,7 @@ export function PartForm({ mode, part, parts, projects, defaultProjectId, onSubm
         <Field label="Код детали"><Input value={code} onChange={setCode} /></Field>
         <Field label="Наименование"><Input value={name} onChange={setName} /></Field>
         <Field label="Номер чертежа"><Input value={drawingNumber} onChange={setDrawingNumber} /></Field>
-        <Field label="Статус"><Select value={status} onChange={(value) => setStatus(value as OperationStatus)} options={statuses} /></Field>
+        <Field label="Статус"><Select value={status} onChange={(value) => setStatus(value as OperationStatus)} options={partStatuses} /></Field>
         <Field label="Описание" wide><Textarea value={description} onChange={setDescription} rows={3} /></Field>
       </div>
       <FormActions onSubmit={submit} onCancel={onCancel} />

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState, type MouseEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import {
   Background,
   Controls,
@@ -46,7 +46,7 @@ import {
   type ToolPosition,
 } from "../../../process-model";
 import { holders, machineCells, machines, tools } from "../../../mock-data";
-import { PageHeader, StatusBadge } from "../../../ui";
+import { StatusBadge } from "../../../ui";
 
 type GroupBlockType = "part_group" | "operation_group" | "setup_group" | "tool_position_group";
 type EntityBlockType = "project" | "part" | "operation" | "setup" | "tool_position" | "unknown";
@@ -137,8 +137,10 @@ export function FlowEditor({ partId, projectId, initialPart }: { partId: string;
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [dirty, setDirty] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [past, setPast] = useState<FlowSnapshot[]>([]);
   const [future, setFuture] = useState<FlowSnapshot[]>([]);
+  const editorRef = useRef<HTMLDivElement | null>(null);
 
   const storageKey = `tech-process:flow:${partId}`;
   const selectedNode = useMemo(() => nodes.find((node) => node.id === selectedNodeId), [nodes, selectedNodeId]);
@@ -214,6 +216,20 @@ export function FlowEditor({ partId, projectId, initialPart }: { partId: string;
       window.removeEventListener("tech-flow:collapse-group", collapseGroup);
       window.removeEventListener("tech-flow:expand-group", expandGroup);
     };
+  });
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if ((event.key === "Delete" || event.key === "Backspace") && selectedNodeId) {
+        const target = event.target as HTMLElement | null;
+        if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.tagName === "SELECT") return;
+        event.preventDefault();
+        deleteBlock(selectedNodeId);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
   });
 
   function onNodesChange(changes: NodeChange<ProcessFlowNode>[]) {
@@ -380,9 +396,12 @@ export function FlowEditor({ partId, projectId, initialPart }: { partId: string;
       expandChildGroup(nodeId);
       return;
     }
-    if (!window.confirm("Удалить блок со схемы?")) return;
-    const nextNodes = nodes.filter((node) => node.id !== nodeId);
-    const nextEdges = edges.filter((edge) => edge.source !== nodeId && edge.target !== nodeId);
+    const descendantIds = collectAllDescendantIds(nodes, edges, nodeId);
+    const deleteIds = new Set([nodeId, ...descendantIds]);
+    const message = descendantIds.length ? "Удалить блок и все дочерние элементы?" : "Удалить блок со схемы?";
+    if (!window.confirm(message)) return;
+    const nextNodes = nodes.filter((node) => !deleteIds.has(node.id));
+    const nextEdges = edges.filter((edge) => !deleteIds.has(edge.source) && !deleteIds.has(edge.target));
     commit(layoutFlowTree(nextNodes, nextEdges), nextEdges);
     setSelectedNodeId(null);
   }
@@ -446,21 +465,30 @@ export function FlowEditor({ partId, projectId, initialPart }: { partId: string;
     commit(layoutFlowTree(nodes, edges), edges);
   }
 
+  function toggleFullscreen() {
+    if (!document.fullscreenElement) {
+      editorRef.current?.requestFullscreen();
+      setIsFullscreen(true);
+      return;
+    }
+
+    document.exitFullscreen();
+    setIsFullscreen(false);
+  }
+
   if (!part) {
     return <div className="rounded-lg border border-slate-200 bg-white p-6 text-sm text-slate-600 shadow-sm">Деталь не найдена.</div>;
   }
 
   return (
-    <div className="space-y-5">
-      <PageHeader
-        title="Свободная схема"
-        description={`${part.code} · ${part.name}. Node-based редактор структуры: проект → деталь → операция → установ → инструментальная позиция.`}
-      />
-
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+    <div ref={editorRef} className="flex h-screen flex-col overflow-hidden bg-slate-100">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white px-3 py-2 shadow-sm">
         <div className="flex flex-wrap items-center gap-2">
           <Link href={`/parts/${part.id}`} className="rounded-md border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700">Карточка детали</Link>
-          <Link href={`/parts/${part.id}/process`} className="rounded-md border border-blue-200 px-3 py-2 text-sm font-semibold text-blue-700">Редактор техпроцесса</Link>
+          <div className="mr-2 min-w-0 text-sm">
+            <div className="font-semibold text-slate-950">{part.code} · {part.name}</div>
+            <div className="text-xs text-slate-500">Node-based редактор техпроцесса</div>
+          </div>
           <button type="button" onClick={() => addBlock()} className="rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white">+ Создать блок</button>
           <button type="button" onClick={autoLayout} className="rounded-md border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700">Автокомпоновка</button>
         </div>
@@ -469,13 +497,14 @@ export function FlowEditor({ partId, projectId, initialPart }: { partId: string;
           <button type="button" onClick={undo} disabled={!past.length} className="rounded-md border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-40">Undo</button>
           <button type="button" onClick={redo} disabled={!future.length} className="rounded-md border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-40">Redo</button>
           <button type="button" onClick={saveFlow} className="rounded-md bg-emerald-600 px-3 py-2 text-sm font-semibold text-white">Сохранить</button>
+          <button type="button" onClick={toggleFullscreen} className="rounded-md border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700">{isFullscreen ? "Окно" : "На весь экран"}</button>
         </div>
       </div>
 
       {message ? <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-700">{message}</div> : null}
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
-        <section className="h-[720px] overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+      <div className="relative min-h-0 flex-1">
+        <section className="absolute inset-0 overflow-hidden bg-white">
           <ReactFlow
             nodes={displayNodes}
             edges={displayEdges}
@@ -484,7 +513,17 @@ export function FlowEditor({ partId, projectId, initialPart }: { partId: string;
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
             onNodeClick={(_, node) => setSelectedNodeId(node.id)}
+            onPaneClick={() => setSelectedNodeId(null)}
             onSelectionChange={({ nodes: selectedNodes }) => setSelectedNodeId(selectedNodes[0]?.id ?? null)}
+            panOnDrag={[1]}
+            selectionOnDrag
+            nodesDraggable
+            elementsSelectable
+            panOnScroll
+            zoomOnScroll={false}
+            zoomOnPinch
+            zoomOnDoubleClick={false}
+            preventScrolling
             fitView
           >
             <Background color="#cbd5e1" gap={18} />
@@ -493,14 +532,19 @@ export function FlowEditor({ partId, projectId, initialPart }: { partId: string;
           </ReactFlow>
         </section>
 
-        <PropertiesPanel
-          node={selectedNode}
-          project={project}
-          part={part}
-          onTypeChange={updateSelectedType}
-          onChange={updateSelectedEntity}
-          onDelete={() => deleteBlock()}
-        />
+        {selectedNode ? (
+          <div className="absolute inset-y-0 right-0 z-10 w-full max-w-md border-l border-slate-200 bg-white shadow-xl">
+            <PropertiesPanel
+              node={selectedNode}
+              project={project}
+              part={part}
+              onTypeChange={updateSelectedType}
+              onChange={updateSelectedEntity}
+              onDelete={() => deleteBlock()}
+              onClose={() => setSelectedNodeId(null)}
+            />
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -568,6 +612,7 @@ function PropertiesPanel({
   onTypeChange,
   onChange,
   onDelete,
+  onClose,
 }: {
   node?: ProcessFlowNode;
   project?: ProcessProject;
@@ -575,25 +620,25 @@ function PropertiesPanel({
   onTypeChange: (type: FlowBlockType) => void;
   onChange: (patch: Record<string, unknown>) => void;
   onDelete: () => void;
+  onClose: () => void;
 }) {
   if (!node) {
-    return (
-      <aside className="rounded-lg border border-slate-200 bg-white p-5 text-sm text-slate-600 shadow-sm">
-        Выберите блок на схеме, чтобы редактировать его свойства.
-      </aside>
-    );
+    return null;
   }
 
   const entity = node.data.entity as Record<string, any>;
 
   return (
-    <aside className="space-y-4 rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+    <aside className="h-full space-y-4 overflow-y-auto bg-white p-5">
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="text-xs font-semibold uppercase text-blue-700">Свойства блока</div>
           <h3 className="mt-1 text-lg font-semibold text-slate-950">{node.data.title}</h3>
         </div>
-        <button type="button" onClick={onDelete} className="rounded-md border border-rose-200 px-3 py-1.5 text-xs font-semibold text-rose-700">Удалить</button>
+        <div className="flex gap-2">
+          <button type="button" onClick={onDelete} className="rounded-md border border-rose-200 px-3 py-1.5 text-xs font-semibold text-rose-700">Удалить</button>
+          <button type="button" onClick={onClose} className="rounded-md border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600">Закрыть</button>
+        </div>
       </div>
 
       <Field label="Тип блока">
@@ -1221,6 +1266,15 @@ function collectVisibleDescendantIds(nodes: ProcessFlowNode[], edges: ProcessFlo
     .filter((node): node is ProcessFlowNode => Boolean(node) && !node.hidden);
 
   return children.flatMap((node) => [node.id, ...collectVisibleDescendantIds(nodes, edges, node.id)]);
+}
+
+function collectAllDescendantIds(nodes: ProcessFlowNode[], edges: ProcessFlowEdge[], sourceId: string): string[] {
+  const children = edges
+    .filter((edge) => edge.source === sourceId)
+    .map((edge) => nodes.find((node) => node.id === edge.target))
+    .filter((node): node is ProcessFlowNode => Boolean(node));
+
+  return children.flatMap((node) => [node.id, ...collectAllDescendantIds(nodes, edges, node.id)]);
 }
 
 function layoutExpandedGroup(nodes: ProcessFlowNode[], edges: ProcessFlowEdge[], parentNode: ProcessFlowNode, childIds: string[]) {

@@ -39,7 +39,7 @@ export function PartsClient() {
     setMessage("Деталь сохранена");
   }
 
-  const activeProjects = projects.filter((project) => !project.isDeleted);
+  const activeProjects = projects.filter((project) => !project.isDeleted && project.status !== "Архив" && project.status !== "Выполнен");
   const activeProjectIds = new Set(activeProjects.map((project) => project.id));
 
   return (
@@ -73,7 +73,7 @@ export function PartsClient() {
       <DataTable
         title="Реестр деталей"
         columns={["Код детали", "Проект", "Наименование", "Чертёж", "Статус", "Операций", "Описание", "Действия"]}
-        rows={parts.filter((part) => !part.isDeleted && part.status !== "Архив" && activeProjectIds.has(part.projectId)).map((part) => [
+        rows={parts.filter((part) => !part.isDeleted && part.status !== "Архив" && part.status !== "Выполнена" && activeProjectIds.has(part.projectId)).map((part) => [
           <Link key={part.id} href={`/parts/${part.id}`} className="font-semibold text-blue-700 hover:text-blue-800">
             {part.code}
           </Link>,
@@ -86,7 +86,7 @@ export function PartsClient() {
           <div key={`${part.id}-actions`} className="flex flex-wrap gap-2">
             <Link href={`/parts/${part.id}`} className="text-sm font-semibold text-blue-700">Открыть</Link>
             <button type="button" onClick={() => setEditingPartId(part.id)} className="text-sm font-semibold text-blue-700">Редактировать</button>
-            <Link href={`/parts/${part.id}/process`} className="text-sm font-semibold text-blue-700">Техпроцесс</Link>
+            <Link href={`/parts/${part.id}/flow`} className="text-sm font-semibold text-blue-700">Техпроцесс</Link>
           </div>,
         ])}
       />

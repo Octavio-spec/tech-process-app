@@ -1,4 +1,4 @@
-export type OperationStatus = "Черновик" | "В работе" | "Требует уточнения" | "Готово" | "Архив";
+export type OperationStatus = "Черновик" | "В работе" | "Требует уточнения" | "Готово" | "Выполнен" | "Выполнена" | "Архив";
 export type ResourceSource = "catalog" | "manual" | "required";
 
 export type Project = {

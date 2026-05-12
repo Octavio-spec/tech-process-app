@@ -73,8 +73,7 @@ export function PartDetailClient({ partId, projectId, initialPart }: { partId: s
 
       <div className="flex flex-wrap items-center gap-2">
         <button type="button" onClick={() => setIsEditOpen(true)} className="rounded-md border border-blue-200 bg-white px-4 py-2 text-sm font-semibold text-blue-700">Редактировать деталь</button>
-        <Link href={`/parts/${part.id}/process`} className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white">Редактировать техпроцесс</Link>
-        <Link href={`/parts/${part.id}/flow`} className="rounded-md border border-blue-200 bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-700">Свободная схема</Link>
+        <Link href={`/parts/${part.id}/flow`} className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white">Редактировать техпроцесс</Link>
         {!part.isDeleted ? <button type="button" onClick={deletePart} className="rounded-md border border-rose-200 px-4 py-2 text-sm font-semibold text-rose-700">Удалить деталь</button> : null}
         {part.isDeleted ? <button type="button" onClick={restorePart} className="rounded-md border border-emerald-200 px-4 py-2 text-sm font-semibold text-emerald-700">Восстановить деталь</button> : null}
       </div>
@@ -121,7 +120,7 @@ export function PartDetailClient({ partId, projectId, initialPart }: { partId: s
             const hasManual = hasManualResources(operation);
 
             return (
-              <Link key={operation.id} href={`/parts/${part.id}/process`} className="min-w-64 rounded-lg border border-blue-200 bg-blue-50 p-4">
+              <Link key={operation.id} href={`/parts/${part.id}/flow`} className="min-w-64 rounded-lg border border-blue-200 bg-blue-50 p-4">
                 <div className="text-sm font-semibold text-blue-700">Операция {operation.operationNo}</div>
                 <div className="mt-1 font-semibold text-slate-950">{operation.name}</div>
                 <div className="mt-3 space-y-1 text-sm text-slate-700">

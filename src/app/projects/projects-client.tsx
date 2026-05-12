@@ -62,8 +62,8 @@ export function ProjectsClient() {
 
   const visibleProjects = projects.filter((project) => {
     if (filter === "deleted") return project.isDeleted;
-    if (filter === "archive") return !project.isDeleted && project.status === "Архив";
-    return !project.isDeleted && project.status !== "Архив";
+    if (filter === "archive") return !project.isDeleted && (project.status === "Архив" || project.status === "Выполнен");
+    return !project.isDeleted && project.status !== "Архив" && project.status !== "Выполнен";
   });
 
   return (

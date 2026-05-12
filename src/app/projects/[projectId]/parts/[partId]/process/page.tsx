@@ -1,5 +1,4 @@
-import { parts } from "../../../../../mock-data";
-import { ProcessEditor } from "../../../../../parts/[id]/process/process-editor";
+import { redirect } from "next/navigation";
 
 type ProjectPartProcessPageProps = {
   params: Promise<{
@@ -10,7 +9,6 @@ type ProjectPartProcessPageProps = {
 
 export default async function ProjectPartProcessPage({ params }: ProjectPartProcessPageProps) {
   const { projectId, partId } = await params;
-  const part = parts.find((item) => item.id === partId);
 
-  return <ProcessEditor partId={partId} projectId={projectId} initialPart={part} />;
+  redirect(`/projects/${projectId}/parts/${partId}/flow`);
 }
