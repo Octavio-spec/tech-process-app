@@ -6,6 +6,7 @@ import {
   Background,
   Controls,
   Handle,
+  MarkerType,
   MiniMap,
   Position,
   ReactFlow,
@@ -47,15 +48,31 @@ import {
 import { holders, machineCells, machines, tools } from "../../../mock-data";
 import { PageHeader, StatusBadge } from "../../../ui";
 
-type FlowBlockType = "project" | "part" | "operation" | "setup" | "tool_position" | "unknown";
+type GroupBlockType = "part_group" | "operation_group" | "setup_group" | "tool_position_group";
+type EntityBlockType = "project" | "part" | "operation" | "setup" | "tool_position" | "unknown";
+type FlowBlockType = EntityBlockType | GroupBlockType;
 
-type FlowEntity = ProcessProject | ProcessPart | ProcessOperation | OperationSetup | ToolPosition | Record<string, never>;
+type CollapsedGroupEntity = {
+  id: string;
+  groupType: GroupBlockType;
+  parentId: string;
+  childType: FlowBlockType;
+  groupedNodeIds: string[];
+  groupedDescendantIds: string[];
+  label: string;
+  countChildren: number;
+  countDescendants: number;
+  isCollapsed: boolean;
+};
+
+type FlowEntity = ProcessProject | ProcessPart | ProcessOperation | OperationSetup | ToolPosition | CollapsedGroupEntity | Record<string, never>;
 
 type FlowNodeData = {
   blockType: FlowBlockType;
   title: string;
   subtitle?: string;
   entity: FlowEntity;
+  canCollapseGroup?: GroupBlockType;
 };
 
 type ProcessFlowNode = Node<FlowNodeData, "processBlock">;
@@ -65,11 +82,21 @@ type FlowSnapshot = { nodes: ProcessFlowNode[]; edges: ProcessFlowEdge[] };
 const flowTypeLabels: Record<FlowBlockType, string> = {
   project: "Проект",
   part: "Деталь",
+  part_group: "Группа деталей",
   operation: "Операция",
+  operation_group: "Группа операций",
   setup: "Установ",
+  setup_group: "Группа установов",
   tool_position: "Инструментальная позиция",
+  tool_position_group: "Группа позиций",
   unknown: "Блок",
 };
+
+const NODE_WIDTH = 260;
+const NODE_HEIGHT = 120;
+const HORIZONTAL_SPACING = 360;
+const VERTICAL_SPACING = 160;
+const SUBTREE_SPACING = 80;
 
 const childTypeByParent: Partial<Record<FlowBlockType, FlowBlockType>> = {
   project: "part",
@@ -77,6 +104,22 @@ const childTypeByParent: Partial<Record<FlowBlockType, FlowBlockType>> = {
   operation: "setup",
   setup: "tool_position",
 };
+
+const groupConfigByParent: Partial<Record<FlowBlockType, {
+  groupType: GroupBlockType;
+  childType: FlowBlockType;
+  label: string;
+  collapseLabel: string;
+}>> = {
+  project: { groupType: "part_group", childType: "part", label: "Детали", collapseLabel: "Свернуть детали" },
+  part: { groupType: "operation_group", childType: "operation", label: "Операции", collapseLabel: "Свернуть операции" },
+  operation: { groupType: "setup_group", childType: "setup", label: "Установы", collapseLabel: "Свернуть установы" },
+  setup: { groupType: "tool_position_group", childType: "tool_position", label: "Инструментальные позиции", collapseLabel: "Свернуть позиции" },
+};
+
+const groupConfigByType = Object.fromEntries(
+  Object.values(groupConfigByParent).map((config) => [config.groupType, config]),
+) as Record<GroupBlockType, NonNullable<(typeof groupConfigByParent)[FlowBlockType]>>;
 
 const statusOptions: OperationStatus[] = ["Черновик", "В работе", "Требует уточнения", "Готово", "Архив"];
 const sourceOptions: Array<{ value: ResourceSource; label: string }> = [
@@ -99,15 +142,18 @@ export function FlowEditor({ partId, projectId, initialPart }: { partId: string;
 
   const storageKey = `tech-process:flow:${partId}`;
   const selectedNode = useMemo(() => nodes.find((node) => node.id === selectedNodeId), [nodes, selectedNodeId]);
+  const displayNodes = useMemo(() => enrichFlowNodes(nodes, edges), [edges, nodes]);
+  const displayEdges = useMemo(() => enrichFlowEdges(edges), [edges]);
 
   const commit = useCallback((nextNodes: ProcessFlowNode[], nextEdges: ProcessFlowEdge[]) => {
     setPast((items) => [...items.slice(-20), { nodes, edges }]);
     setFuture([]);
     setNodes(nextNodes);
     setEdges(nextEdges);
+    persistFlowSnapshot(storageKey, nextNodes, nextEdges);
     setDirty(true);
     setMessage("");
-  }, [edges, nodes]);
+  }, [edges, nodes, storageKey]);
 
   useEffect(() => {
     const loadedParts = loadPartsFromStorage();
@@ -124,8 +170,8 @@ export function FlowEditor({ partId, projectId, initialPart }: { partId: string;
     if (saved) {
       try {
         const parsed = JSON.parse(saved) as FlowSnapshot;
-        setNodes(parsed.nodes ?? []);
-        setEdges(parsed.edges ?? []);
+        setNodes((parsed.nodes ?? []).map(normalizeFlowNode));
+        setEdges((parsed.edges ?? []).map(normalizeFlowEdge));
         setSelectedNodeId(parsed.nodes?.[0]?.id ?? null);
         return;
       } catch {
@@ -150,21 +196,41 @@ export function FlowEditor({ partId, projectId, initialPart }: { partId: string;
       deleteBlock((event as CustomEvent<string>).detail);
     }
 
+    function collapseGroup(event: Event) {
+      collapseChildGroup((event as CustomEvent<string>).detail);
+    }
+
+    function expandGroup(event: Event) {
+      expandChildGroup((event as CustomEvent<string>).detail);
+    }
+
     window.addEventListener("tech-flow:add-child", addChild);
     window.addEventListener("tech-flow:delete-node", deleteNode);
+    window.addEventListener("tech-flow:collapse-group", collapseGroup);
+    window.addEventListener("tech-flow:expand-group", expandGroup);
     return () => {
       window.removeEventListener("tech-flow:add-child", addChild);
       window.removeEventListener("tech-flow:delete-node", deleteNode);
+      window.removeEventListener("tech-flow:collapse-group", collapseGroup);
+      window.removeEventListener("tech-flow:expand-group", expandGroup);
     };
   });
 
   function onNodesChange(changes: NodeChange<ProcessFlowNode>[]) {
-    setNodes((currentNodes) => applyNodeChanges(changes, currentNodes));
+    setNodes((currentNodes) => {
+      const nextNodes = applyNodeChanges(changes, currentNodes);
+      persistFlowSnapshot(storageKey, nextNodes, edges);
+      return nextNodes;
+    });
     setDirty(true);
   }
 
   function onEdgesChange(changes: EdgeChange<ProcessFlowEdge>[]) {
-    setEdges((currentEdges) => applyEdgeChanges(changes, currentEdges));
+    setEdges((currentEdges) => {
+      const nextEdges = applyEdgeChanges(changes, currentEdges);
+      persistFlowSnapshot(storageKey, nodes, nextEdges);
+      return nextEdges;
+    });
     setDirty(true);
   }
 
@@ -175,9 +241,9 @@ export function FlowEditor({ partId, projectId, initialPart }: { partId: string;
     const targetNode = nodes.find((node) => node.id === connection.target);
     if (!sourceNode || !targetNode) return;
 
-    const expectedType = childTypeByParent[sourceNode.data.blockType];
+    const expectedType = sourceNode.data.blockType === "unknown" ? "unknown" : childTypeByParent[sourceNode.data.blockType];
     if (!expectedType) {
-      setMessage("Для инструментальной позиции нельзя создать дочерний блок");
+      setMessage("Инструментальная позиция — конечный блок цепочки");
       return;
     }
 
@@ -190,34 +256,134 @@ export function FlowEditor({ partId, projectId, initialPart }: { partId: string;
       ? nodes.map((node) => node.id === targetNode.id ? withType(node, expectedType) : node)
       : nodes;
 
-    commit(nextNodes, addEdge({ ...connection, type: "smoothstep", animated: false }, edges));
+    const nextEdges = addEdge(createFlowEdge(connection.source, connection.target), edges);
+    commit(layoutFlowTree(nextNodes, nextEdges), nextEdges);
   }
 
   function addBlock(parentId = selectedNodeId) {
     const parentNode = parentId ? nodes.find((node) => node.id === parentId) : undefined;
-    const blockType = parentNode ? childTypeByParent[parentNode.data.blockType] : "unknown";
+
+    if (isGroupType(parentNode?.data.blockType)) {
+      expandChildGroup(parentNode.id, true);
+      return;
+    }
+
+    const blockType = parentNode ? childTypeByParent[parentNode.data.blockType] ?? (parentNode.data.blockType === "unknown" ? "unknown" : undefined) : "unknown";
 
     if (!blockType) {
-      setMessage("Для инструментальной позиции нельзя создать дочерний блок");
+      setMessage("Инструментальная позиция — конечный блок цепочки");
       return;
     }
 
     const position = parentNode
-      ? { x: parentNode.position.x + 300, y: parentNode.position.y + 110 }
-      : { x: 220, y: 160 };
-    const node = createFlowNode(blockType, position, { part, project, operations, parentNode, nodes });
+      ? getNextChildPosition(parentNode, outgoing(nodes, edges, parentNode.id, blockType), nodes)
+      : findFreePosition({ x: 220, y: 160 }, nodes);
+    const node = createFlowNode(blockType, position, { part, project, operations, parentNode, nodes, edges });
     const nextEdges = parentNode
-      ? [...edges, { id: createId("edge"), source: parentNode.id, target: node.id, type: "smoothstep" }]
+      ? [...edges, createFlowEdge(parentNode.id, node.id)]
       : edges;
 
-    commit([...nodes, node], nextEdges);
+    commit(layoutFlowTree([...nodes, node], nextEdges), nextEdges);
     setSelectedNodeId(node.id);
+  }
+
+  function collapseChildGroup(parentId: string) {
+    const parentNode = nodes.find((node) => node.id === parentId);
+    const config = parentNode ? groupConfigByParent[parentNode.data.blockType] : undefined;
+    if (!parentNode || !config) return;
+
+    const childNodes = outgoing(nodes, edges, parentId, config.childType).filter((node) => !node.hidden);
+    if (childNodes.length < 2) {
+      setMessage("Для сворачивания нужно минимум два параллельных блока");
+      return;
+    }
+
+    const groupedNodeIds = childNodes.map((node) => node.id);
+    const groupedDescendantIds = groupedNodeIds.flatMap((nodeId) => collectVisibleDescendantIds(nodes, edges, nodeId));
+    const hiddenIds = new Set([...groupedNodeIds, ...groupedDescendantIds]);
+    const firstChild = [...childNodes].sort((first, second) => first.position.y - second.position.y)[0];
+    const groupNode = createFlowNode(
+      config.groupType,
+      findFreePosition(firstChild.position, nodes, hiddenIds),
+      {
+        entity: {
+          id: `${parentId}-${config.groupType}`,
+          groupType: config.groupType,
+          parentId,
+          childType: config.childType,
+          groupedNodeIds,
+          groupedDescendantIds,
+          label: config.label,
+          countChildren: groupedNodeIds.length,
+          countDescendants: groupedDescendantIds.length,
+          isCollapsed: true,
+        } satisfies CollapsedGroupEntity,
+      },
+    );
+
+    const nextNodes = [
+      ...nodes
+        .filter((node) => node.id !== groupNode.id)
+        .map((node) => hiddenIds.has(node.id) ? { ...node, hidden: true } : node),
+      groupNode,
+    ];
+    const nextEdges = [
+      ...edges
+        .filter((edge) => edge.source !== parentId || edge.target !== groupNode.id)
+        .map((edge) => hiddenIds.has(edge.source) || hiddenIds.has(edge.target) ? { ...edge, hidden: true } : edge),
+      createFlowEdge(parentId, groupNode.id, `edge-${parentId}-${groupNode.id}`),
+    ];
+
+    commit(layoutFlowTree(nextNodes, nextEdges), nextEdges);
+    setSelectedNodeId(groupNode.id);
+  }
+
+  function expandChildGroup(groupId: string, addChildAfter = false) {
+    const groupNode = nodes.find((node) => node.id === groupId);
+    if (!groupNode || !isGroupType(groupNode.data.blockType)) return;
+
+    const group = groupNode.data.entity as CollapsedGroupEntity;
+    const parentNode = nodes.find((node) => node.id === group.parentId);
+    if (!parentNode) return;
+
+    const childIds = new Set(group.groupedNodeIds);
+    const descendantIds = new Set(group.groupedDescendantIds);
+    const visibleIds = new Set([...childIds, ...descendantIds]);
+    const layoutNodes = layoutExpandedGroup(
+      nodes.filter((node) => node.id !== groupId).map((node) => visibleIds.has(node.id) ? { ...node, hidden: false } : node),
+      edges,
+      parentNode,
+      [...childIds],
+    );
+    const nextEdges = edges
+      .filter((edge) => edge.source !== groupId && edge.target !== groupId)
+      .map((edge) => visibleIds.has(edge.source) || visibleIds.has(edge.target) ? { ...normalizeFlowEdge(edge), hidden: false } : normalizeFlowEdge(edge));
+
+    if (addChildAfter) {
+      const childType = group.childType;
+      const childNodes = outgoing(layoutNodes, nextEdges, parentNode.id, childType);
+      const node = createFlowNode(childType, getNextChildPosition(parentNode, childNodes, layoutNodes), { part, project, operations, parentNode, nodes: layoutNodes, edges: nextEdges });
+      const finalEdges = [...nextEdges, createFlowEdge(parentNode.id, node.id)];
+      commit(layoutFlowTree([...layoutNodes, node], finalEdges), finalEdges);
+      setSelectedNodeId(node.id);
+      return;
+    }
+
+    commit(layoutFlowTree(layoutNodes, nextEdges), nextEdges);
+    setSelectedNodeId(parentNode.id);
   }
 
   function deleteBlock(nodeId = selectedNodeId) {
     if (!nodeId) return;
+    const node = nodes.find((item) => item.id === nodeId);
+    if (isGroupType(node?.data.blockType)) {
+      expandChildGroup(nodeId);
+      return;
+    }
     if (!window.confirm("Удалить блок со схемы?")) return;
-    commit(nodes.filter((node) => node.id !== nodeId), edges.filter((edge) => edge.source !== nodeId && edge.target !== nodeId));
+    const nextNodes = nodes.filter((node) => node.id !== nodeId);
+    const nextEdges = edges.filter((edge) => edge.source !== nodeId && edge.target !== nodeId);
+    commit(layoutFlowTree(nextNodes, nextEdges), nextEdges);
     setSelectedNodeId(null);
   }
 
@@ -261,6 +427,7 @@ export function FlowEditor({ partId, projectId, initialPart }: { partId: string;
     setPast((items) => items.slice(0, -1));
     setNodes(previous.nodes);
     setEdges(previous.edges);
+    persistFlowSnapshot(storageKey, previous.nodes, previous.edges);
     setDirty(true);
   }
 
@@ -271,26 +438,12 @@ export function FlowEditor({ partId, projectId, initialPart }: { partId: string;
     setFuture((items) => items.slice(1));
     setNodes(next.nodes);
     setEdges(next.edges);
+    persistFlowSnapshot(storageKey, next.nodes, next.edges);
     setDirty(true);
   }
 
   function autoLayout() {
-    const levels: Record<FlowBlockType, number> = {
-      project: 0,
-      part: 1,
-      operation: 2,
-      setup: 3,
-      tool_position: 4,
-      unknown: 2,
-    };
-    const counters: Partial<Record<FlowBlockType, number>> = {};
-    const nextNodes = nodes.map((node) => {
-      const type = node.data.blockType;
-      const index = counters[type] ?? 0;
-      counters[type] = index + 1;
-      return { ...node, position: { x: 40 + levels[type] * 290, y: 80 + index * 155 } };
-    });
-    commit(nextNodes, edges);
+    commit(layoutFlowTree(nodes, edges), edges);
   }
 
   if (!part) {
@@ -308,7 +461,7 @@ export function FlowEditor({ partId, projectId, initialPart }: { partId: string;
         <div className="flex flex-wrap items-center gap-2">
           <Link href={`/parts/${part.id}`} className="rounded-md border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700">Карточка детали</Link>
           <Link href={`/parts/${part.id}/process`} className="rounded-md border border-blue-200 px-3 py-2 text-sm font-semibold text-blue-700">Редактор техпроцесса</Link>
-          <button type="button" onClick={() => addBlock()} className="rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white">Добавить блок</button>
+          <button type="button" onClick={() => addBlock()} className="rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white">+ Создать блок</button>
           <button type="button" onClick={autoLayout} className="rounded-md border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700">Автокомпоновка</button>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -324,8 +477,8 @@ export function FlowEditor({ partId, projectId, initialPart }: { partId: string;
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
         <section className="h-[720px] overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
           <ReactFlow
-            nodes={nodes}
-            edges={edges}
+            nodes={displayNodes}
+            edges={displayEdges}
             nodeTypes={{ processBlock: FlowBlockNode }}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
@@ -354,8 +507,11 @@ export function FlowEditor({ partId, projectId, initialPart }: { partId: string;
 }
 
 function FlowBlockNode({ id, data, selected }: NodeProps<ProcessFlowNode>) {
+  const groupConfig = isGroupType(data.blockType) ? groupConfigByType[data.blockType] : undefined;
+  const canAddChild = data.blockType !== "tool_position";
+
   return (
-    <div className={`min-w-56 rounded-lg border bg-white p-3 shadow-sm ${selected ? "border-blue-500 ring-2 ring-blue-100" : "border-slate-200"}`}>
+    <div className={`relative min-w-56 rounded-lg border bg-white p-3 pr-8 shadow-sm ${selected ? "border-blue-500 ring-2 ring-blue-100" : "border-slate-200"}`}>
       <Handle type="target" position={Position.Left} className="!bg-blue-500" />
       <div className="flex items-start justify-between gap-3">
         <div>
@@ -364,11 +520,38 @@ function FlowBlockNode({ id, data, selected }: NodeProps<ProcessFlowNode>) {
           {data.subtitle ? <div className="mt-1 max-w-52 truncate text-xs text-slate-500">{data.subtitle}</div> : null}
         </div>
         <div className="flex gap-1">
-          <button type="button" title="Добавить дочерний блок" onClick={(event) => dispatchNodeEvent(event, "tech-flow:add-child", id)} className="rounded border border-blue-200 px-2 text-xs font-semibold text-blue-700">+</button>
           <button type="button" title="Удалить блок" onClick={(event) => dispatchNodeEvent(event, "tech-flow:delete-node", id)} className="rounded border border-rose-200 px-2 text-xs font-semibold text-rose-700">×</button>
         </div>
       </div>
-      <Handle type="source" position={Position.Right} className="!bg-blue-500" />
+      {data.canCollapseGroup ? (
+        <button
+          type="button"
+          onClick={(event) => dispatchNodeEvent(event, "tech-flow:collapse-group", id)}
+          className="mt-3 rounded-md border border-blue-200 bg-blue-50 px-2 py-1 text-xs font-semibold text-blue-700"
+        >
+          {groupConfigByType[data.canCollapseGroup].collapseLabel}
+        </button>
+      ) : null}
+      {groupConfig ? (
+        <button
+          type="button"
+          onClick={(event) => dispatchNodeEvent(event, "tech-flow:expand-group", id)}
+          className="mt-3 rounded-md border border-blue-200 bg-blue-600 px-2 py-1 text-xs font-semibold text-white"
+        >
+          Развернуть
+        </button>
+      ) : null}
+      {canAddChild ? (
+        <button
+          type="button"
+          title={groupConfig ? `Развернуть и добавить ${flowTypeLabels[groupConfig.childType].toLowerCase()}` : "Создать дочерний блок"}
+          onClick={(event) => dispatchNodeEvent(event, "tech-flow:add-child", id)}
+          className="absolute -right-4 top-1/2 z-10 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full border border-blue-200 bg-blue-600 text-base font-semibold leading-none text-white shadow-sm hover:bg-blue-700"
+        >
+          +
+        </button>
+      ) : null}
+      <Handle type="source" position={Position.Right} className="!bg-blue-500" style={canAddChild ? undefined : { opacity: 0.35 }} />
     </div>
   );
 }
@@ -498,7 +681,15 @@ function PropertiesPanel({
         </div>
       ) : null}
 
-      {node.data.blockType !== "unknown" ? (
+      {isGroupType(node.data.blockType) ? (
+        <div className="space-y-2 rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800">
+          <div className="font-semibold">Свернутая группа</div>
+          <div>{entity.label}: {entity.countChildren ?? 0}</div>
+          <div>Вложенных блоков: {entity.countDescendants ?? 0}</div>
+        </div>
+      ) : null}
+
+      {node.data.blockType !== "unknown" && !isGroupType(node.data.blockType) ? (
         <div className="pt-2">
           <StatusBadge status={(entity.status ?? "Черновик") as OperationStatus} />
         </div>
@@ -591,25 +782,25 @@ function buildInitialFlow(project: ProcessProject | undefined, part: ProcessPart
 
   if (part) {
     nodes.push(createFlowNode("part", { x: 330, y: 80 }, { entity: part }));
-    if (project) edges.push({ id: `edge-${project.id}-${part.id}`, source: `project-${project.id}`, target: `part-${part.id}`, type: "smoothstep" });
+    if (project) edges.push(createFlowEdge(`project-${project.id}`, `part-${part.id}`, `edge-${project.id}-${part.id}`));
   }
 
   operations.forEach((operation, operationIndex) => {
     nodes.push(createFlowNode("operation", { x: 620, y: 80 + operationIndex * 180 }, { entity: operation }));
-    if (part) edges.push({ id: `edge-${part.id}-${operation.id}`, source: `part-${part.id}`, target: `operation-${operation.id}`, type: "smoothstep" });
+    if (part) edges.push(createFlowEdge(`part-${part.id}`, `operation-${operation.id}`, `edge-${part.id}-${operation.id}`));
 
     operation.setups.forEach((setup, setupIndex) => {
       nodes.push(createFlowNode("setup", { x: 910, y: 80 + operationIndex * 180 + setupIndex * 90 }, { entity: setup }));
-      edges.push({ id: `edge-${operation.id}-${setup.id}`, source: `operation-${operation.id}`, target: `setup-${setup.id}`, type: "smoothstep" });
+      edges.push(createFlowEdge(`operation-${operation.id}`, `setup-${setup.id}`, `edge-${operation.id}-${setup.id}`));
 
       setup.toolPositions.forEach((position, positionIndex) => {
         nodes.push(createFlowNode("tool_position", { x: 1200, y: 80 + operationIndex * 180 + setupIndex * 90 + positionIndex * 80 }, { entity: position }));
-        edges.push({ id: `edge-${setup.id}-${position.id}`, source: `setup-${setup.id}`, target: `position-${position.id}`, type: "smoothstep" });
+        edges.push(createFlowEdge(`setup-${setup.id}`, `position-${position.id}`, `edge-${setup.id}-${position.id}`));
       });
     });
   });
 
-  return { nodes, edges };
+  return { nodes: layoutFlowTree(nodes, edges), edges };
 }
 
 function createFlowNode(
@@ -622,6 +813,7 @@ function createFlowNode(
     operations?: ProcessOperation[];
     parentNode?: ProcessFlowNode;
     nodes?: ProcessFlowNode[];
+    edges?: ProcessFlowEdge[];
   },
 ): ProcessFlowNode {
   const entity = context.entity ?? defaultEntity(blockType, context);
@@ -629,6 +821,8 @@ function createFlowNode(
     id: nodeId(blockType, entity),
     type: "processBlock",
     position,
+    sourcePosition: Position.Right,
+    targetPosition: Position.Left,
     data: {
       blockType,
       title: flowTypeLabels[blockType],
@@ -647,7 +841,7 @@ function withType(node: ProcessFlowNode, blockType: FlowBlockType): ProcessFlowN
   return { ...nextNode, id: node.id };
 }
 
-function defaultEntity(blockType: FlowBlockType, context: { part?: ProcessPart; project?: ProcessProject; operations?: ProcessOperation[]; parentNode?: ProcessFlowNode; nodes?: ProcessFlowNode[] }): FlowEntity {
+function defaultEntity(blockType: FlowBlockType, context: { part?: ProcessPart; project?: ProcessProject; operations?: ProcessOperation[]; parentNode?: ProcessFlowNode; nodes?: ProcessFlowNode[]; edges?: ProcessFlowEdge[] }): FlowEntity {
   const date = new Date().toLocaleDateString("ru-RU");
   if (blockType === "project") {
     return {
@@ -668,7 +862,7 @@ function defaultEntity(blockType: FlowBlockType, context: { part?: ProcessPart; 
     return {
       id: createId("part"),
       projectId: context.project?.id ?? "project-r120",
-      code: "",
+      code: nextPartCode(context.nodes),
       name: "Новая деталь",
       drawingNumber: "",
       description: "",
@@ -687,13 +881,29 @@ function defaultEntity(blockType: FlowBlockType, context: { part?: ProcessPart; 
   }
 
   if (blockType === "setup") {
-    const setupCount = context.nodes?.filter((node) => node.data.blockType === "setup").length ?? 0;
-    return emptySetup(setupCount + 1);
+    const setupNo = nextChildNumber(context.nodes, context.edges, context.parentNode, "setup", (node) => (node.data.entity as OperationSetup).setupNo);
+    return emptySetup(setupNo);
+  }
+
+  if (isGroupType(blockType)) {
+    const config = groupConfigByType[blockType];
+    return {
+      id: createId(blockType),
+      groupType: blockType,
+      parentId: "",
+      childType: config.childType,
+      groupedNodeIds: [],
+      groupedDescendantIds: [],
+      label: config.label,
+      countChildren: 0,
+      countDescendants: 0,
+      isCollapsed: true,
+    } satisfies CollapsedGroupEntity;
   }
 
   if (blockType === "tool_position") {
-    const positionCount = context.nodes?.filter((node) => node.data.blockType === "tool_position").length ?? 0;
-    return emptyToolPosition(positionCount + 1);
+    const positionNo = nextChildNumber(context.nodes, context.edges, context.parentNode, "tool_position", (node) => (node.data.entity as ToolPosition).positionNo);
+    return { ...emptyToolPosition(positionNo), status: "Черновик" };
   }
 
   return {};
@@ -709,6 +919,9 @@ function describeNode(blockType: FlowBlockType, entity: Record<string, any>) {
   if (blockType === "setup") {
     return { title: entity.name || `Установ ${entity.setupNo ?? ""}`, subtitle: entity.fixtureSource === "manual" ? entity.fixtureManualText : entity.fixtureSource === "catalog" ? holderName(entity.fixtureId) : "Приспособление требуется подобрать" };
   }
+  if (isGroupType(blockType)) {
+    return describeGroupNode(blockType, entity as CollapsedGroupEntity);
+  }
   if (blockType === "tool_position") {
     const cell = entity.cellSource === "catalog" ? cellName(entity.cellId) : entity.cellSource === "manual" ? entity.cellManualText : "Ячейка?";
     const holder = entity.holderSource === "catalog" ? holderName(entity.holderId) : entity.holderSource === "manual" ? entity.holderManualText : "Оправка?";
@@ -720,17 +933,352 @@ function describeNode(blockType: FlowBlockType, entity: Record<string, any>) {
 
 function nodeId(blockType: FlowBlockType, entity: FlowEntity) {
   const typed = entity as { id?: string };
-  const prefix = blockType === "tool_position" ? "position" : blockType;
+  const prefix = blockType === "tool_position" ? "position" : isGroupType(blockType) ? "group" : blockType;
   return typed.id ? `${prefix}-${typed.id}` : `${prefix}-${createId("node")}`;
 }
 
 function nodeColor(blockType: FlowBlockType) {
   if (blockType === "project") return "#1d4ed8";
   if (blockType === "part") return "#0891b2";
+  if (blockType === "part_group") return "#0e7490";
   if (blockType === "operation") return "#2563eb";
+  if (blockType === "operation_group") return "#1d4ed8";
   if (blockType === "setup") return "#7c3aed";
+  if (blockType === "setup_group") return "#4f46e5";
   if (blockType === "tool_position") return "#ea580c";
+  if (blockType === "tool_position_group") return "#c2410c";
   return "#64748b";
+}
+
+function isGroupType(blockType: FlowBlockType | undefined): blockType is GroupBlockType {
+  return blockType === "part_group" || blockType === "operation_group" || blockType === "setup_group" || blockType === "tool_position_group";
+}
+
+function describeGroupNode(blockType: GroupBlockType, entity: CollapsedGroupEntity) {
+  if (blockType === "part_group") {
+    return { title: entity.label || "Детали", subtitle: `${entity.countChildren} детали · открыть список деталей` };
+  }
+
+  if (blockType === "operation_group") {
+    return { title: entity.label || "Операции", subtitle: `${entity.countChildren} операции · сортировка по номеру` };
+  }
+
+  if (blockType === "setup_group") {
+    return { title: entity.label || "Установы", subtitle: `${entity.countChildren} установа · ${countGroupedType(entity, "tool_position")} позиций` };
+  }
+
+  return { title: entity.label || "Инструментальные позиции", subtitle: `${entity.countChildren} позиций · Ячейка → Оправка → Инструмент` };
+}
+
+function countGroupedType(entity: CollapsedGroupEntity, blockType: FlowBlockType) {
+  return entity.groupedDescendantIds.filter((id) => id.startsWith(`${blockType === "tool_position" ? "position" : blockType}-`)).length;
+}
+
+function compareFlowNodes(first: ProcessFlowNode, second: ProcessFlowNode) {
+  if (first.data.blockType === "operation" && second.data.blockType === "operation") {
+    return sortOperationsByNumber([first.data.entity as ProcessOperation, second.data.entity as ProcessOperation])[0].id === (first.data.entity as ProcessOperation).id ? -1 : 1;
+  }
+
+  if (first.data.blockType === "setup" && second.data.blockType === "setup") {
+    return ((first.data.entity as OperationSetup).setupNo ?? 0) - ((second.data.entity as OperationSetup).setupNo ?? 0);
+  }
+
+  if (first.data.blockType === "tool_position" && second.data.blockType === "tool_position") {
+    return ((first.data.entity as ToolPosition).positionNo ?? 0) - ((second.data.entity as ToolPosition).positionNo ?? 0);
+  }
+
+  return first.position.y - second.position.y || first.position.x - second.position.x;
+}
+
+function nextChildNumber(
+  nodes: ProcessFlowNode[] | undefined,
+  edges: ProcessFlowEdge[] | undefined,
+  parentNode: ProcessFlowNode | undefined,
+  childType: FlowBlockType,
+  readNumber: (node: ProcessFlowNode) => number | undefined,
+) {
+  if (!nodes || !edges || !parentNode) return 1;
+
+  const childNumbers = outgoing(nodes, edges, parentNode.id, childType)
+    .map(readNumber)
+    .filter((value): value is number => Number.isFinite(value));
+
+  return childNumbers.length ? Math.max(...childNumbers) + 1 : 1;
+}
+
+function flowLevel(blockType: FlowBlockType) {
+  if (blockType === "project") return 0;
+  if (blockType === "part" || blockType === "part_group") return 1;
+  if (blockType === "operation" || blockType === "operation_group") return 2;
+  if (blockType === "setup" || blockType === "setup_group") return 3;
+  if (blockType === "tool_position" || blockType === "tool_position_group") return 4;
+  return 2;
+}
+
+function layoutFlowTree(nodes: ProcessFlowNode[], edges: ProcessFlowEdge[]) {
+  const visibleNodes = nodes.filter((node) => !node.hidden);
+  const visibleNodeIds = new Set(visibleNodes.map((node) => node.id));
+  const visibleEdges = edges.filter((edge) => !edge.hidden && visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target));
+  const incomingByTarget = new Map<string, ProcessFlowEdge[]>();
+  const childrenBySource = new Map<string, ProcessFlowNode[]>();
+
+  visibleEdges.forEach((edge) => {
+    incomingByTarget.set(edge.target, [...(incomingByTarget.get(edge.target) ?? []), edge]);
+    const target = visibleNodes.find((node) => node.id === edge.target);
+    if (target) childrenBySource.set(edge.source, [...(childrenBySource.get(edge.source) ?? []), target]);
+  });
+
+  const roots = visibleNodes
+    .filter((node) => !incomingByTarget.has(node.id))
+    .sort((first, second) => flowLevel(first.data.blockType) - flowLevel(second.data.blockType) || compareFlowNodes(first, second));
+  const positioned = new Map<string, { x: number; y: number }>();
+  const visiting = new Set<string>();
+
+  function subtreeHeight(node: ProcessFlowNode): number {
+    if (visiting.has(node.id)) return NODE_HEIGHT + SUBTREE_SPACING;
+    visiting.add(node.id);
+    const children = (childrenBySource.get(node.id) ?? []).sort(compareFlowNodes);
+    if (!children.length) {
+      visiting.delete(node.id);
+      return NODE_HEIGHT + SUBTREE_SPACING;
+    }
+
+    const height = Math.max(NODE_HEIGHT + SUBTREE_SPACING, children.reduce((sum, child) => sum + subtreeHeight(child), 0));
+    visiting.delete(node.id);
+    return height;
+  }
+
+  function placeNode(node: ProcessFlowNode, startY: number) {
+    const x = 40 + flowLevel(node.data.blockType) * HORIZONTAL_SPACING;
+    positioned.set(node.id, { x, y: startY });
+
+    let childY = startY;
+    const children = (childrenBySource.get(node.id) ?? []).sort(compareFlowNodes);
+    children.forEach((child) => {
+      placeNode(child, childY);
+      childY += subtreeHeight(child);
+    });
+  }
+
+  let cursorY = 80;
+  roots.forEach((root) => {
+    placeNode(root, cursorY);
+    cursorY += subtreeHeight(root);
+  });
+
+  return nodes.map((node) => {
+    const position = positioned.get(node.id);
+    return position ? { ...node, position } : node;
+  });
+}
+
+function createFlowEdge(source: string, target: string, id = createId("edge")): ProcessFlowEdge {
+  return {
+    id,
+    source,
+    target,
+    type: "smoothstep",
+    animated: false,
+    style: { stroke: "#2563eb", strokeWidth: 2 },
+    markerEnd: {
+      type: MarkerType.ArrowClosed,
+      color: "#2563eb",
+      width: 18,
+      height: 18,
+    },
+  };
+}
+
+function normalizeFlowEdge(edge: ProcessFlowEdge): ProcessFlowEdge {
+  return { ...createFlowEdge(edge.source, edge.target, edge.id), hidden: edge.hidden, selected: edge.selected };
+}
+
+function normalizeFlowNode(node: ProcessFlowNode): ProcessFlowNode {
+  if (isGroupType(node.data.blockType)) {
+    const config = groupConfigByType[node.data.blockType];
+    const legacyEntity = node.data.entity as Partial<CollapsedGroupEntity> & { countSetups?: number; countToolPositions?: number };
+    return refreshNode({
+      ...node,
+      sourcePosition: Position.Right,
+      targetPosition: Position.Left,
+      data: {
+        ...node.data,
+        entity: {
+          id: legacyEntity.id ?? node.id,
+          groupType: legacyEntity.groupType ?? node.data.blockType,
+          parentId: legacyEntity.parentId ?? "",
+          childType: legacyEntity.childType ?? config.childType,
+          groupedNodeIds: legacyEntity.groupedNodeIds ?? [],
+          groupedDescendantIds: legacyEntity.groupedDescendantIds ?? [],
+          label: legacyEntity.label ?? config.label,
+          countChildren: legacyEntity.countChildren ?? legacyEntity.countSetups ?? 0,
+          countDescendants: legacyEntity.countDescendants ?? legacyEntity.countToolPositions ?? 0,
+          isCollapsed: legacyEntity.isCollapsed ?? true,
+        } satisfies CollapsedGroupEntity,
+      },
+    });
+  }
+
+  return {
+    ...node,
+    sourcePosition: Position.Right,
+    targetPosition: Position.Left,
+  };
+}
+
+function enrichFlowEdges(edges: ProcessFlowEdge[]) {
+  return edges.map((edge) => ({
+    ...edge,
+    style: {
+      ...(edge.style ?? {}),
+      stroke: "#2563eb",
+      strokeWidth: edge.selected ? 3 : 2,
+    },
+  }));
+}
+
+function enrichFlowNodes(nodes: ProcessFlowNode[], edges: ProcessFlowEdge[]) {
+  return nodes.map((node) => {
+    const config = groupConfigByParent[node.data.blockType];
+    if (!config || node.hidden) {
+      return node;
+    }
+
+    const hasGroup = outgoing(nodes, edges, node.id, config.groupType).some((child) => !child.hidden);
+    const visibleChildren = outgoing(nodes, edges, node.id, config.childType).filter((child) => !child.hidden);
+    return {
+      ...node,
+      data: {
+        ...node.data,
+        canCollapseGroup: visibleChildren.length >= 2 && !hasGroup ? config.groupType : undefined,
+      },
+    };
+  });
+}
+
+function getNextChildPosition(parentNode: ProcessFlowNode, existingChildren: ProcessFlowNode[], allNodes: ProcessFlowNode[]) {
+  const visibleChildren = existingChildren.filter((node) => !node.hidden);
+  const nextY = visibleChildren.length
+    ? Math.max(...visibleChildren.map((node) => node.position.y)) + VERTICAL_SPACING
+    : parentNode.position.y;
+  const basePosition = {
+    x: parentNode.position.x + HORIZONTAL_SPACING,
+    y: nextY,
+  };
+
+  return findFreePosition(basePosition, allNodes);
+}
+
+function isPositionOccupied(position: { x: number; y: number }, allNodes: ProcessFlowNode[], ignoredNodeIds = new Set<string>()) {
+  return allNodes.some((node) => {
+    if (node.hidden || ignoredNodeIds.has(node.id)) return false;
+    return Math.abs(node.position.x - position.x) < NODE_WIDTH && Math.abs(node.position.y - position.y) < NODE_HEIGHT;
+  });
+}
+
+function findFreePosition(position: { x: number; y: number }, allNodes: ProcessFlowNode[], ignoredNodeIds = new Set<string>()) {
+  let nextPosition = { ...position };
+  let guard = 0;
+
+  while (isPositionOccupied(nextPosition, allNodes, ignoredNodeIds) && guard < 80) {
+    nextPosition = { ...nextPosition, y: nextPosition.y + VERTICAL_SPACING };
+    guard += 1;
+  }
+
+  return nextPosition;
+}
+
+function shiftOverlappingNodes(nodes: ProcessFlowNode[], movedNodeIds: string[]) {
+  const movedIds = new Set(movedNodeIds);
+  const nextNodes = [...nodes];
+
+  for (const movedId of movedNodeIds) {
+    const movedNode = nextNodes.find((node) => node.id === movedId);
+    if (!movedNode) continue;
+
+    let hasOverlap = true;
+    let guard = 0;
+    while (hasOverlap && guard < 80) {
+      const overlap = nextNodes.find((node) => {
+        if (node.id === movedNode.id || node.hidden || movedIds.has(node.id)) return false;
+        return Math.abs(node.position.x - movedNode.position.x) < NODE_WIDTH && Math.abs(node.position.y - movedNode.position.y) < NODE_HEIGHT;
+      });
+      hasOverlap = Boolean(overlap);
+      if (overlap) {
+        overlap.position = { ...overlap.position, y: overlap.position.y + VERTICAL_SPACING };
+      }
+      guard += 1;
+    }
+  }
+
+  return nextNodes;
+}
+
+function collectVisibleDescendantIds(nodes: ProcessFlowNode[], edges: ProcessFlowEdge[], sourceId: string): string[] {
+  const children = edges
+    .filter((edge) => edge.source === sourceId && !edge.hidden)
+    .map((edge) => nodes.find((node) => node.id === edge.target))
+    .filter((node): node is ProcessFlowNode => Boolean(node) && !node.hidden);
+
+  return children.flatMap((node) => [node.id, ...collectVisibleDescendantIds(nodes, edges, node.id)]);
+}
+
+function layoutExpandedGroup(nodes: ProcessFlowNode[], edges: ProcessFlowEdge[], parentNode: ProcessFlowNode, childIds: string[]) {
+  const childIdSet = new Set(childIds);
+  const childNodes = nodes
+    .filter((node) => childIdSet.has(node.id))
+    .sort(compareFlowNodes);
+
+  let nextNodes = nodes.map((node) => ({ ...node, position: { ...node.position } }));
+  childNodes.forEach((childNode, childIndex) => {
+    const childPosition = findFreePosition(
+      {
+        x: parentNode.position.x + HORIZONTAL_SPACING,
+        y: parentNode.position.y + childIndex * VERTICAL_SPACING,
+      },
+      nextNodes,
+      childIdSet,
+    );
+    nextNodes = nextNodes.map((node) => node.id === childNode.id ? { ...node, position: childPosition } : node);
+
+    nextNodes = layoutVisibleDescendants(nextNodes, edges, childNode.id, childPosition, childIdSet);
+  });
+
+  return nextNodes;
+}
+
+function layoutVisibleDescendants(nodes: ProcessFlowNode[], edges: ProcessFlowEdge[], parentId: string, parentPosition: { x: number; y: number }, ignoredNodeIds: Set<string>) {
+  let nextNodes = nodes;
+  const children = edges
+    .filter((edge) => edge.source === parentId && !edge.hidden)
+    .map((edge) => nextNodes.find((node) => node.id === edge.target))
+    .filter((node): node is ProcessFlowNode => Boolean(node) && !node.hidden)
+    .sort(compareFlowNodes);
+  const childIds = new Set(children.map((node) => node.id));
+
+  children.forEach((child, childIndex) => {
+    const nextPosition = findFreePosition(
+      {
+        x: parentPosition.x + HORIZONTAL_SPACING,
+        y: parentPosition.y + childIndex * VERTICAL_SPACING,
+      },
+      nextNodes,
+      new Set([...ignoredNodeIds, ...childIds]),
+    );
+    nextNodes = nextNodes.map((node) => node.id === child.id ? { ...node, position: nextPosition } : node);
+    nextNodes = layoutVisibleDescendants(nextNodes, edges, child.id, nextPosition, new Set([...ignoredNodeIds, ...childIds]));
+  });
+
+  return nextNodes;
+}
+
+function nextPartCode(nodes?: ProcessFlowNode[]) {
+  const count = nodes?.filter((node) => node.data.blockType === "part").length ?? 0;
+  return `ТП-${String(count + 1).padStart(3, "0")}`;
+}
+
+function persistFlowSnapshot(storageKey: string, nodes: ProcessFlowNode[], edges: ProcessFlowEdge[]) {
+  window.localStorage.setItem(storageKey, JSON.stringify({ nodes, edges }));
 }
 
 function persistFlowOperations(partId: string, nodes: ProcessFlowNode[], edges: ProcessFlowEdge[]) {
