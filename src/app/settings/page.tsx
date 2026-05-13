@@ -7,19 +7,33 @@ import {
   parseFlowControls,
   type FlowWheelMode,
 } from "../flow-controls";
+import { applyTheme, defaultTheme, parseTheme, THEME_STORAGE_KEY, type AppTheme } from "../theme-settings";
 import { InfoCard, PageHeader } from "../ui";
 
 export default function SettingsPage() {
   const [wheelMode, setWheelMode] = useState<FlowWheelMode>(defaultFlowControls.wheelMode);
+  const [theme, setTheme] = useState<AppTheme>(defaultTheme);
   const [message, setMessage] = useState("");
 
   useEffect(() => {
     setWheelMode(parseFlowControls(window.localStorage.getItem(FLOW_CONTROLS_STORAGE_KEY)).wheelMode);
+    setTheme(parseTheme(window.localStorage.getItem(THEME_STORAGE_KEY)));
   }, []);
 
   function saveSettings() {
     window.localStorage.setItem(FLOW_CONTROLS_STORAGE_KEY, JSON.stringify({ wheelMode }));
+    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+    applyTheme(theme);
+    window.dispatchEvent(new Event("tech-process:theme-change"));
     setMessage("Настройки сохранены");
+  }
+
+  function changeTheme(nextTheme: AppTheme) {
+    setTheme(nextTheme);
+    window.localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+    applyTheme(nextTheme);
+    window.dispatchEvent(new Event("tech-process:theme-change"));
+    setMessage("Тема изменена");
   }
 
   return (
@@ -43,6 +57,40 @@ export default function SettingsPage() {
 
       <InfoCard title="Управление схемой">
         <div className="space-y-4">
+          <div>
+            <div className="text-sm font-semibold text-slate-950">Тема интерфейса</div>
+            <div className="mt-2 grid gap-2 md:grid-cols-2">
+              <button
+                type="button"
+                onClick={() => changeTheme("light")}
+                className={`rounded-md border px-4 py-3 text-left text-sm font-semibold ${
+                  theme === "light"
+                    ? "border-blue-500 bg-blue-50 text-blue-700"
+                    : "border-slate-200 bg-white text-slate-700"
+                }`}
+              >
+                Светлая
+                <span className="mt-1 block text-xs font-normal text-slate-500">
+                  Базовый светлый инженерный интерфейс.
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => changeTheme("dark")}
+                className={`rounded-md border px-4 py-3 text-left text-sm font-semibold ${
+                  theme === "dark"
+                    ? "border-blue-500 bg-blue-50 text-blue-700"
+                    : "border-slate-200 bg-white text-slate-700"
+                }`}
+              >
+                Тёмная
+                <span className="mt-1 block text-xs font-normal text-slate-500">
+                  Приглушённый режим для длительной работы со схемой.
+                </span>
+              </button>
+            </div>
+          </div>
+
           <div>
             <div className="text-sm font-semibold text-slate-950">Колесо мыши</div>
             <div className="mt-2 grid gap-2 md:grid-cols-2">

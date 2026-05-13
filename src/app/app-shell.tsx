@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Archive, Box, Briefcase, Database, FileText, Home, Settings } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
+import { applyTheme, parseTheme, THEME_STORAGE_KEY } from "./theme-settings";
 
 const navItems = [
   { href: "/", label: "Главная", icon: Home },
@@ -24,6 +25,20 @@ export function AppShell({ children }: { children: ReactNode }) {
     const saved = window.localStorage.getItem("tech-process:sidebar-collapsed");
     setIsSidebarCollapsed(saved ? saved === "true" : isFlowEditor);
   }, [isFlowEditor]);
+
+  useEffect(() => {
+    function syncTheme() {
+      applyTheme(parseTheme(window.localStorage.getItem(THEME_STORAGE_KEY)));
+    }
+
+    syncTheme();
+    window.addEventListener("storage", syncTheme);
+    window.addEventListener("tech-process:theme-change", syncTheme);
+    return () => {
+      window.removeEventListener("storage", syncTheme);
+      window.removeEventListener("tech-process:theme-change", syncTheme);
+    };
+  }, []);
 
   function toggleSidebar() {
     setIsSidebarCollapsed((current) => {

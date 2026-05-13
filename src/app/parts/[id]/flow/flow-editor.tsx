@@ -84,6 +84,14 @@ type ProcessFlowEdge = Edge;
 type FlowSnapshot = { nodes: ProcessFlowNode[]; edges: ProcessFlowEdge[] };
 type FlowEditorMode = "part" | "project" | "projects";
 type ProjectsFlowView = "active" | "archive";
+type ConfirmDialogState = {
+  title: string;
+  body?: string;
+  details?: string[];
+  confirmLabel?: string;
+  tone?: "danger" | "default";
+  onConfirm: () => void;
+};
 
 const flowTypeLabels: Record<FlowBlockType, string> = {
   project: "Проект",
@@ -166,7 +174,9 @@ export function FlowEditor({
   const [message, setMessage] = useState("");
   const [dirty, setDirty] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [nodesUnlocked, setNodesUnlocked] = useState(false);
   const [wheelMode, setWheelMode] = useState<FlowWheelMode>("pan");
+  const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
   const [past, setPast] = useState<FlowSnapshot[]>([]);
   const [future, setFuture] = useState<FlowSnapshot[]>([]);
   const editorRef = useRef<HTMLDivElement | null>(null);
@@ -412,7 +422,9 @@ export function FlowEditor({
 
     const position = parentNode
       ? getNextChildPosition(parentNode, outgoing(nodes, edges, parentNode.id, blockType), nodes)
-      : findFreePosition({ x: 220, y: 160 }, nodes);
+      : blockType === "project"
+        ? getNextProjectRootPosition(nodes)
+        : findFreePosition({ x: 220, y: 160 }, nodes);
     const contextPart = parentNode ? findNearestPart(nodes, edges, parentNode.id) ?? part : part;
     const contextProject = parentNode ? findNearestProject(nodes, edges, parentNode.id) ?? project : project;
     const contextOperations = contextPart ? sortOperationsByNumber(loadOperationsFromStorage(contextPart.id)) : operations;
@@ -592,15 +604,20 @@ export function FlowEditor({
 
     if (!selectedEdgeIds.length) return;
 
-    const message = selectedEdgeIds.length > 1 ? "Удалить выбранные связи?" : "Удалить выбранную связь?";
-    if (!window.confirm(message)) return;
-
-    const selectedEdgeIdSet = new Set(selectedEdgeIds);
-    const nextEdges = edges.filter((edge) => !selectedEdgeIdSet.has(edge.id));
-    commit(layoutAfterStructuralChange(nodes, nextEdges, mode, selectedProjectId), nextEdges);
-    setSelectedEdgeIds([]);
-    setSelectedNodeId(null);
-    setSelectedNodeIds([]);
+    requestConfirm({
+      title: selectedEdgeIds.length > 1 ? "Удалить выбранные связи?" : "Удалить выбранную связь?",
+      body: "Связи будут удалены со схемы. Блоки останутся на месте.",
+      confirmLabel: "Удалить",
+      tone: "danger",
+      onConfirm: () => {
+        const selectedEdgeIdSet = new Set(selectedEdgeIds);
+        const nextEdges = edges.filter((edge) => !selectedEdgeIdSet.has(edge.id));
+        commit(layoutAfterStructuralChange(nodes, nextEdges, mode, selectedProjectId), nextEdges);
+        setSelectedEdgeIds([]);
+        setSelectedNodeId(null);
+        setSelectedNodeIds([]);
+      },
+    });
   }
 
   function deleteNodesAndEdges(selectedIds: Set<string>) {
@@ -609,32 +626,39 @@ export function FlowEditor({
     const deleteIds = getNodesToDelete(selectedIds);
     const removedEdges = edges.filter((edge) => deleteIds.has(edge.source) || deleteIds.has(edge.target));
     const childCount = [...deleteIds].filter((nodeId) => !selectedIds.has(nodeId)).length;
-    const confirmText = selectedIds.size > 1 || childCount > 0
-      ? `Удалить выбранные блоки?\n\nБудет удалено:\n- выбранных блоков: ${selectedIds.size}\n- дочерних блоков: ${childCount}\n- связей: ${removedEdges.length}\n\nПродолжить?`
-      : "Удалить блок со схемы?";
+    requestConfirm({
+      title: selectedIds.size > 1 || childCount > 0 ? "Удалить выбранные блоки?" : "Удалить блок со схемы?",
+      body: childCount > 0 ? "Дочерние элементы выбранных блоков тоже будут удалены." : "Действие изменит схему и связанные данные.",
+      details: [
+        `Выбранных блоков: ${selectedIds.size}`,
+        `Дочерних блоков: ${childCount}`,
+        `Связей: ${removedEdges.length}`,
+      ],
+      confirmLabel: "Удалить",
+      tone: "danger",
+      onConfirm: () => {
+        if (mode === "project") {
+          softDeletePartNodes(nodes.filter((node) => deleteIds.has(node.id) && node.data.blockType === "part"));
+          setProjectParts(getActiveProjectParts(loadPartsFromStorage(), project?.id));
+        } else if (mode === "projects") {
+          softDeleteProjectNodes(nodes.filter((node) => deleteIds.has(node.id) && node.data.blockType === "project"));
+          softDeletePartNodes(nodes.filter((node) => deleteIds.has(node.id) && node.data.blockType === "part"));
+          setProjects(loadProjectsFromStorage());
+        }
 
-    if (!window.confirm(confirmText)) return;
-
-    if (mode === "project") {
-      softDeletePartNodes(nodes.filter((node) => deleteIds.has(node.id) && node.data.blockType === "part"));
-      setProjectParts(getActiveProjectParts(loadPartsFromStorage(), project?.id));
-    } else if (mode === "projects") {
-      softDeleteProjectNodes(nodes.filter((node) => deleteIds.has(node.id) && node.data.blockType === "project"));
-      softDeletePartNodes(nodes.filter((node) => deleteIds.has(node.id) && node.data.blockType === "part"));
-      setProjects(loadProjectsFromStorage());
-    }
-
-    const nextNodes = nodes.filter((node) => !deleteIds.has(node.id));
-    const nextEdges = edges.filter((edge) => !deleteIds.has(edge.source) && !deleteIds.has(edge.target));
-    commit(layoutAfterStructuralChange(nextNodes, nextEdges, mode, selectedProjectId), nextEdges);
-    setSelectedNodeId(null);
-    setSelectedNodeIds([]);
-    setSelectedEdgeIds([]);
+        const nextNodes = nodes.filter((node) => !deleteIds.has(node.id));
+        const nextEdges = edges.filter((edge) => !deleteIds.has(edge.source) && !deleteIds.has(edge.target));
+        commit(layoutAfterStructuralChange(nextNodes, nextEdges, mode, selectedProjectId), nextEdges);
+        setSelectedNodeId(null);
+        setSelectedNodeIds([]);
+        setSelectedEdgeIds([]);
+      },
+    });
   }
 
   function updateSelectedEntity(patch: Record<string, unknown>) {
     if (!selectedNode) return;
-    const nextNodes = nodes.map((node) => {
+    let nextNodes = nodes.map((node) => {
       if (node.id !== selectedNode.id) return node;
       const entity = { ...node.data.entity, ...patch } as FlowEntity;
       return refreshNode({ ...node, data: { ...node.data, entity } });
@@ -645,22 +669,32 @@ export function FlowEditor({
         setProjectParts(getActiveProjectParts(loadPartsFromStorage(), project?.id));
       }
     }
+    if (mode === "projects" && selectedNode.data.blockType === "project" && "priority" in patch) {
+      nextNodes = reorderProjectRootsByPriority(nextNodes, edges);
+    }
     commit(nextNodes, edges);
   }
 
   function archiveSelectedProject() {
     if (!selectedNode || selectedNode.data.blockType !== "project") return;
-    if (!window.confirm("Перенести проект в архив?")) return;
-    const projectEntity = selectedNode.data.entity as ProcessProject;
-    const date = new Date().toLocaleDateString("ru-RU");
-    const nextProjects = loadProjectsFromStorage().map((item) => item.id === projectEntity.id ? { ...item, status: "Архив" as OperationStatus, updatedAt: date } : item);
-    saveProjectsToStorage(nextProjects);
-    setProjects(nextProjects);
-    setSelectedNodeId(null);
-    setSelectedNodeIds([]);
-    setSelectedProjectId(undefined);
-    const synced = syncProjectsFlow({ nodes, edges }, getVisibleProjects(nextProjects, projectsView), loadPartsFromStorage(), undefined, undefined, projectsView);
-    commit(synced.nodes, synced.edges);
+    requestConfirm({
+      title: "Перенести проект в архив?",
+      body: "Проект будет скрыт из активной схемы и появится в архивном режиме.",
+      confirmLabel: "В архив",
+      tone: "danger",
+      onConfirm: () => {
+        const projectEntity = selectedNode.data.entity as ProcessProject;
+        const date = new Date().toLocaleDateString("ru-RU");
+        const nextProjects = loadProjectsFromStorage().map((item) => item.id === projectEntity.id ? { ...item, status: "Архив" as OperationStatus, updatedAt: date } : item);
+        saveProjectsToStorage(nextProjects);
+        setProjects(nextProjects);
+        setSelectedNodeId(null);
+        setSelectedNodeIds([]);
+        setSelectedProjectId(undefined);
+        const synced = syncProjectsFlow({ nodes, edges }, getVisibleProjects(nextProjects, projectsView), loadPartsFromStorage(), undefined, undefined, projectsView);
+        commit(synced.nodes, synced.edges);
+      },
+    });
   }
 
   function restoreSelectedProject() {
@@ -748,6 +782,10 @@ export function FlowEditor({
   function changeWheelMode(nextMode: FlowWheelMode) {
     setWheelMode(nextMode);
     window.localStorage.setItem(FLOW_CONTROLS_STORAGE_KEY, JSON.stringify({ wheelMode: nextMode }));
+  }
+
+  function requestConfirm(dialog: ConfirmDialogState) {
+    setConfirmDialog(dialog);
   }
 
   function closePropertiesPanel() {
@@ -885,7 +923,7 @@ export function FlowEditor({
             }}
             panOnDrag={[1]}
             selectionOnDrag
-            nodesDraggable
+            nodesDraggable={nodesUnlocked}
             elementsSelectable
             deleteKeyCode={null}
             panOnScroll={wheelMode === "pan"}
@@ -899,7 +937,7 @@ export function FlowEditor({
           >
             <Background color="#cbd5e1" gap={18} />
             <MiniMap pannable zoomable nodeColor={(node) => nodeColor((node as ProcessFlowNode).data.blockType)} />
-            <Controls />
+            <Controls onInteractiveChange={(interactive) => setNodesUnlocked(interactive)} />
           </ReactFlow>
         </section>
 
@@ -919,6 +957,52 @@ export function FlowEditor({
             />
           </div>
         ) : null}
+        {confirmDialog ? (
+          <ConfirmDialog
+            dialog={confirmDialog}
+            onCancel={() => setConfirmDialog(null)}
+            onConfirm={() => {
+              const action = confirmDialog.onConfirm;
+              setConfirmDialog(null);
+              action();
+            }}
+          />
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function ConfirmDialog({
+  dialog,
+  onCancel,
+  onConfirm,
+}: {
+  dialog: ConfirmDialogState;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div className="absolute inset-0 z-30 flex items-center justify-center bg-slate-950/30 px-4">
+      <div className="w-full max-w-md rounded-lg border border-slate-200 bg-white p-5 shadow-2xl">
+        <div className="text-sm font-semibold uppercase text-blue-700">Подтверждение действия</div>
+        <h3 className="mt-2 text-lg font-semibold text-slate-950">{dialog.title}</h3>
+        {dialog.body ? <p className="mt-2 text-sm text-slate-600">{dialog.body}</p> : null}
+        {dialog.details?.length ? (
+          <div className="mt-4 rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+            {dialog.details.map((item) => <div key={item}>{item}</div>)}
+          </div>
+        ) : null}
+        <div className="mt-5 flex justify-end gap-2">
+          <button type="button" onClick={onCancel} className="rounded-md border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700">Отмена</button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className={`rounded-md px-3 py-2 text-sm font-semibold text-white ${dialog.tone === "danger" ? "bg-rose-600 hover:bg-rose-700" : "bg-blue-600 hover:bg-blue-700"}`}
+          >
+            {dialog.confirmLabel ?? "Подтвердить"}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -932,21 +1016,21 @@ function FlowBlockNode({ id, data, selected }: NodeProps<ProcessFlowNode>) {
   const archiveLabel = entity.isDeleted ? "УДАЛЁН" : entity.status === "Выполнен" ? "ВЫПОЛНЕН" : isArchivedProject ? "АРХИВ" : "";
 
   return (
-    <div className={`relative min-w-56 rounded-lg border p-3 pr-8 shadow-sm ${isArchivedProject ? "bg-slate-50 opacity-90" : "bg-white"} ${selected ? "border-blue-500 ring-2 ring-blue-100" : "border-slate-200"}`}>
+    <div className={`relative h-[120px] w-[260px] overflow-hidden rounded-lg border p-3 pr-8 shadow-sm ${isArchivedProject ? "bg-slate-50 opacity-90" : "bg-white"} ${selected ? "border-blue-500 ring-2 ring-blue-100" : "border-slate-200"}`}>
       <Handle type="target" position={Position.Left} className="!bg-blue-500" />
       <div className="flex items-start justify-between gap-3">
         <div>
           {archiveLabel ? <div className="mb-1 inline-flex rounded bg-slate-200 px-2 py-0.5 text-[10px] font-bold text-slate-600">{archiveLabel}</div> : null}
           <div className="text-[11px] font-semibold uppercase tracking-wide text-blue-700">{flowTypeLabels[data.blockType]}</div>
-          <div className="mt-1 text-sm font-semibold text-slate-950">{data.title}</div>
-          {data.subtitle ? <div className="mt-1 max-w-52 truncate text-xs text-slate-500">{data.subtitle}</div> : null}
+          <div className="mt-1 line-clamp-2 text-sm font-semibold leading-snug text-slate-950">{data.title}</div>
+          {data.subtitle ? <div className="mt-1 max-w-44 truncate text-xs text-slate-500">{data.subtitle}</div> : null}
           {data.blockType === "project" ? <div className="mt-1 text-xs font-semibold text-slate-500">Деталей: {entity.partCount ?? 0}</div> : null}
         </div>
         <div className="flex gap-1">
           <button type="button" title="Удалить блок" onClick={(event) => dispatchNodeEvent(event, "tech-flow:delete-node", id)} className="rounded border border-rose-200 px-2 text-xs font-semibold text-rose-700">×</button>
         </div>
       </div>
-      {data.canCollapseGroup ? (
+      {data.canCollapseGroup && data.blockType !== "project" ? (
         <button
           type="button"
           onClick={(event) => dispatchNodeEvent(event, "tech-flow:collapse-group", id)}
@@ -1441,6 +1525,32 @@ function layoutAfterStructuralChange(nodes: ProcessFlowNode[], edges: ProcessFlo
   return mode === "projects" ? layoutProjectsFlowKeepingProjectPositions(nodes, edges, selectedProjectId) : layoutFlowTree(nodes, edges);
 }
 
+function reorderProjectRootsByPriority(nodes: ProcessFlowNode[], edges: ProcessFlowEdge[]) {
+  const projectNodes = nodes
+    .filter((node) => node.data.blockType === "project")
+    .sort((first, second) => compareProjectsByPriority(first.data.entity as ProcessProject, second.data.entity as ProcessProject));
+  const offsets = new Map<string, number>();
+
+  projectNodes.forEach((node, index) => {
+    offsets.set(node.id, 80 + index * VERTICAL_SPACING - node.position.y);
+  });
+
+  const nodeToProject = new Map<string, string>();
+  projectNodes.forEach((projectNode) => {
+    nodeToProject.set(projectNode.id, projectNode.id);
+    collectAllDescendantIds(nodes, edges, projectNode.id).forEach((descendantId) => {
+      nodeToProject.set(descendantId, projectNode.id);
+    });
+  });
+
+  return nodes.map((node) => {
+    const projectNodeId = nodeToProject.get(node.id);
+    const offsetY = projectNodeId ? offsets.get(projectNodeId) ?? 0 : 0;
+    if (!offsetY) return node;
+    return { ...node, position: { ...node.position, y: node.position.y + offsetY } };
+  });
+}
+
 function selectionIdForSyncedFlow(nodes: ProcessFlowNode[], mode: FlowEditorMode, selectedProjectId: string | undefined, selectedPartId: string | undefined) {
   const preferredId = mode === "projects"
     ? selectedPartId ? `part-${selectedPartId}` : selectedProjectId ? `project-${selectedProjectId}` : undefined
@@ -1529,8 +1639,8 @@ function defaultEntity(blockType: FlowBlockType, context: { part?: ProcessPart; 
   }
 
   if (blockType === "operation") {
-    const flowOperations = context.nodes?.filter((node) => node.data.blockType === "operation").map((node) => node.data.entity as ProcessOperation) ?? [];
-    return emptyOperation(context.part?.id ?? "local-part", nextOperationNo([...(context.operations ?? []), ...flowOperations]));
+    const partId = context.part?.id ?? "local-part";
+    return emptyOperation(partId, nextOperationNoForPart(context, partId));
   }
 
   if (blockType === "setup") {
@@ -1663,6 +1773,25 @@ function nextChildNumber(
     .filter((value): value is number => Number.isFinite(value));
 
   return childNumbers.length ? Math.max(...childNumbers) + 1 : 1;
+}
+
+function nextOperationNoForPart(
+  context: { part?: ProcessPart; operations?: ProcessOperation[]; parentNode?: ProcessFlowNode; nodes?: ProcessFlowNode[]; edges?: ProcessFlowEdge[] },
+  partId: string,
+) {
+  const flowOperations = context.parentNode && context.nodes && context.edges
+    ? outgoing(context.nodes, context.edges, context.parentNode.id, "operation").map((node) => node.data.entity as ProcessOperation)
+    : context.nodes
+      ?.filter((node) => node.data.blockType === "operation" && (node.data.entity as ProcessOperation).partId === partId)
+      .map((node) => node.data.entity as ProcessOperation) ?? [];
+  const storedOperations = context.operations?.filter((operation) => operation.partId === partId) ?? loadOperationsFromStorage(partId);
+  const byNumber = new Map<string, ProcessOperation>();
+
+  [...storedOperations, ...flowOperations].forEach((operation) => {
+    byNumber.set(operation.operationNo, operation);
+  });
+
+  return nextOperationNo([...byNumber.values()]);
 }
 
 function flowLevel(blockType: FlowBlockType) {
@@ -1798,6 +1927,10 @@ function enrichFlowEdges(edges: ProcessFlowEdge[]) {
 
 function enrichFlowNodes(nodes: ProcessFlowNode[], edges: ProcessFlowEdge[]) {
   return nodes.map((node) => {
+    if (node.data.blockType === "project") {
+      return { ...node, data: { ...node.data, canCollapseGroup: undefined } };
+    }
+
     const config = groupConfigByParent[node.data.blockType];
     if (!config || node.hidden) {
       return node;
@@ -1826,6 +1959,16 @@ function getNextChildPosition(parentNode: ProcessFlowNode, existingChildren: Pro
   };
 
   return findFreePosition(basePosition, allNodes);
+}
+
+function getNextProjectRootPosition(nodes: ProcessFlowNode[]) {
+  const projectNodes = nodes.filter((node) => node.data.blockType === "project" && !node.hidden);
+  if (!projectNodes.length) return { x: 40, y: 80 };
+
+  return {
+    x: 40,
+    y: Math.max(...projectNodes.map((node) => node.position.y)) + VERTICAL_SPACING,
+  };
 }
 
 function isPositionOccupied(position: { x: number; y: number }, allNodes: ProcessFlowNode[], ignoredNodeIds = new Set<string>()) {
