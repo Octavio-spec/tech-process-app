@@ -1014,22 +1014,33 @@ function FlowBlockNode({ id, data, selected }: NodeProps<ProcessFlowNode>) {
   const entity = data.entity as Record<string, any>;
   const isArchivedProject = data.blockType === "project" && (entity.isDeleted || entity.status === "Архив" || entity.status === "Выполнен");
   const archiveLabel = entity.isDeleted ? "УДАЛЁН" : entity.status === "Выполнен" ? "ВЫПОЛНЕН" : isArchivedProject ? "АРХИВ" : "";
+  const statusLabel = typeof entity.status === "string" ? entity.status : "";
+  const addTooltip = addTooltipByType(data.blockType, groupConfig);
 
   return (
-    <div className={`relative h-[120px] w-[260px] overflow-hidden rounded-lg border p-3 pr-8 shadow-sm ${isArchivedProject ? "bg-slate-50 opacity-90" : "bg-white"} ${selected ? "border-blue-500 ring-2 ring-blue-100" : "border-slate-200"}`}>
+    <div className={`relative h-[120px] w-[260px] overflow-visible rounded-lg border bg-white p-3 pr-11 shadow-sm ${isArchivedProject ? "opacity-90" : ""} ${selected ? "border-blue-500 ring-2 ring-blue-100" : "border-slate-200"}`}>
       <Handle type="target" position={Position.Left} className="!bg-blue-500" />
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          {archiveLabel ? <div className="mb-1 inline-flex rounded bg-slate-200 px-2 py-0.5 text-[10px] font-bold text-slate-600">{archiveLabel}</div> : null}
+      <div className="flex h-full min-w-0 flex-col">
+        <div className="flex h-5 items-center gap-2">
           <div className="text-[11px] font-semibold uppercase tracking-wide text-blue-700">{flowTypeLabels[data.blockType]}</div>
-          <div className="mt-1 line-clamp-2 text-sm font-semibold leading-snug text-slate-950">{data.title}</div>
-          {data.subtitle ? <div className="mt-1 max-w-44 truncate text-xs text-slate-500">{data.subtitle}</div> : null}
-          {data.blockType === "project" ? <div className="mt-1 text-xs font-semibold text-slate-500">Деталей: {entity.partCount ?? 0}</div> : null}
+          {archiveLabel ? <div className="inline-flex rounded bg-slate-200 px-2 py-0.5 text-[10px] font-bold text-slate-600">{archiveLabel}</div> : null}
         </div>
-        <div className="flex gap-1">
-          <button type="button" title="Удалить блок" onClick={(event) => dispatchNodeEvent(event, "tech-flow:delete-node", id)} className="rounded border border-rose-200 px-2 text-xs font-semibold text-rose-700">×</button>
-        </div>
+        <div className="mt-1 line-clamp-2 min-h-9 text-sm font-semibold leading-snug text-slate-950">{data.title}</div>
+        {data.subtitle ? <div className="mt-1 max-w-44 truncate text-xs text-slate-500">{data.subtitle}</div> : null}
+        {data.blockType === "project" ? <div className="mt-auto pb-5 text-xs font-semibold text-slate-500">Деталей: {entity.partCount ?? 0}</div> : null}
       </div>
+      <button type="button" title="Удалить блок" onClick={(event) => dispatchNodeEvent(event, "tech-flow:delete-node", id)} className="absolute right-3 top-3 rounded border border-rose-200 bg-white/80 px-2 text-xs font-semibold text-rose-700">×</button>
+      {canAddChild && addTooltip ? (
+        <FlowNodeAddButton
+          tooltipText={addTooltip}
+          onAdd={(event) => dispatchNodeEvent(event, "tech-flow:add-child", id)}
+        />
+      ) : null}
+      {data.blockType === "project" && statusLabel ? (
+        <div className="absolute bottom-3 right-3 max-w-28 truncate rounded border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-bold uppercase text-blue-700">
+          {statusLabel}
+        </div>
+      ) : null}
       {data.canCollapseGroup && data.blockType !== "project" ? (
         <button
           type="button"
@@ -1048,19 +1059,61 @@ function FlowBlockNode({ id, data, selected }: NodeProps<ProcessFlowNode>) {
           Развернуть
         </button>
       ) : null}
-      {canAddChild ? (
-        <button
-          type="button"
-          title={groupConfig ? `Развернуть и добавить ${flowTypeLabels[groupConfig.childType].toLowerCase()}` : "Создать дочерний блок"}
-          onClick={(event) => dispatchNodeEvent(event, "tech-flow:add-child", id)}
-          className="absolute -right-4 top-1/2 z-10 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full border border-blue-200 bg-blue-600 text-base font-semibold leading-none text-white shadow-sm hover:bg-blue-700"
-        >
-          +
-        </button>
-      ) : null}
       <Handle type="source" position={Position.Right} className="!bg-blue-500" style={canAddChild ? undefined : { opacity: 0.35 }} />
     </div>
   );
+}
+
+function FlowNodeAddButton({
+  tooltipText,
+  onAdd,
+}: {
+  tooltipText: string;
+  onAdd: (event: MouseEvent) => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={tooltipText}
+      onClick={onAdd}
+      className="group absolute right-4 top-1/2 z-50 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-[10px] bg-transparent text-[#64748b] opacity-75 transition-all duration-150 ease-out hover:z-[1000] hover:bg-[rgba(37,99,235,0.12)] hover:text-[#60a5fa] hover:opacity-100 hover:shadow-[0_0_12px_rgba(59,130,246,0.35)]"
+    >
+      <svg
+        viewBox="0 0 32 32"
+        aria-hidden="true"
+        className="h-6 w-6 overflow-visible"
+      >
+        <path
+          d="M19 8 L27 16 L19 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        <path
+          d="M8 16 H16 M12 12 V20"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+      <span className="pointer-events-none absolute left-1/2 top-full z-[1000] mt-2 max-w-36 -translate-x-1/2 translate-y-1 whitespace-nowrap rounded-md border border-blue-400/40 bg-slate-950 px-2 py-1 text-[11px] font-semibold text-blue-100 opacity-0 shadow-xl transition group-hover:translate-y-0 group-hover:opacity-100">
+        {tooltipText}
+      </span>
+    </button>
+  );
+}
+
+function addTooltipByType(blockType: FlowBlockType, groupConfig?: NonNullable<(typeof groupConfigByParent)[FlowBlockType]>) {
+  if (groupConfig) return `Развернуть и добавить ${flowTypeLabels[groupConfig.childType].toLowerCase()}`;
+  if (blockType === "project") return "Создать деталь";
+  if (blockType === "part") return "Создать операцию";
+  if (blockType === "operation") return "Создать установ";
+  if (blockType === "setup") return "Создать позицию";
+  return "";
 }
 
 const processNodeTypes = { processBlock: FlowBlockNode };
