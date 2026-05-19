@@ -47,7 +47,7 @@ import {
   type ToolPosition,
 } from "../../../process-model";
 import { FLOW_CONTROLS_STORAGE_KEY, parseFlowControls, type FlowWheelMode } from "../../../flow-controls";
-import { holders, machineCells, machines, tools } from "../../../mock-data";
+import { holders, machineCells, machines, tools, type Holder, type MachineCell, type Tool } from "../../../mock-data";
 import { StatusBadge } from "../../../ui";
 
 type GroupBlockType = "part_group" | "operation_group" | "setup_group" | "tool_position_group";
@@ -108,9 +108,17 @@ const flowTypeLabels: Record<FlowBlockType, string> = {
 
 const NODE_WIDTH = 260;
 const NODE_HEIGHT = 120;
+const TOOL_POSITION_NODE_HEIGHT = 72;
 const HORIZONTAL_SPACING = 360;
 const VERTICAL_SPACING = 160;
+const TOOL_POSITION_VERTICAL_SPACING = 88;
 const SUBTREE_SPACING = 80;
+const FLOW_HOLDERS_STORAGE_KEY = "tech-process-flow-holders";
+const FLOW_TOOLS_STORAGE_KEY = "tech-process-flow-tools";
+const PROPERTIES_PANEL_WIDTH_KEY = "tech-process-flow-properties-width";
+const DEFAULT_PROPERTIES_PANEL_WIDTH = 420;
+const MIN_PROPERTIES_PANEL_WIDTH = 360;
+const MAX_PROPERTIES_PANEL_WIDTH = 900;
 
 const childTypeByParent: Partial<Record<FlowBlockType, FlowBlockType>> = {
   project: "part",
@@ -176,17 +184,22 @@ export function FlowEditor({
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [nodesUnlocked, setNodesUnlocked] = useState(false);
   const [wheelMode, setWheelMode] = useState<FlowWheelMode>("pan");
+  const [catalogHolders, setCatalogHolders] = useState<Holder[]>(holders);
+  const [catalogTools, setCatalogTools] = useState<Tool[]>(tools);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
   const [past, setPast] = useState<FlowSnapshot[]>([]);
   const [future, setFuture] = useState<FlowSnapshot[]>([]);
+  const [propertiesPanelWidth, setPropertiesPanelWidth] = useState(DEFAULT_PROPERTIES_PANEL_WIDTH);
   const editorRef = useRef<HTMLDivElement | null>(null);
   const flowCanvasRef = useRef<HTMLDivElement | null>(null);
   const flowInstanceRef = useRef<ReactFlowInstance<ProcessFlowNode, ProcessFlowEdge> | null>(null);
+  const resizingPropertiesPanelRef = useRef(false);
 
   const storageKey = mode === "projects" ? "tech-process-flow-projects" : mode === "project" ? `tech-process-flow-project-${projectId}` : `tech-process:flow:${partId}`;
-  const selectedNode = useMemo(() => nodes.find((node) => node.id === selectedNodeId), [nodes, selectedNodeId]);
-  const displayNodes = useMemo(() => enrichFlowNodes(nodes, edges), [edges, nodes]);
-  const displayEdges = useMemo(() => enrichFlowEdges(edges), [edges]);
+  const visualFlow = useMemo(() => withToolPositionGroups(nodes, edges), [edges, nodes]);
+  const selectedNode = useMemo(() => visualFlow.nodes.find((node) => node.id === selectedNodeId), [selectedNodeId, visualFlow.nodes]);
+  const displayNodes = useMemo(() => enrichFlowNodes(visualFlow.nodes, visualFlow.edges), [visualFlow.edges, visualFlow.nodes]);
+  const displayEdges = useMemo(() => enrichFlowEdges(visualFlow.edges), [visualFlow.edges]);
 
   const commit = useCallback((nextNodes: ProcessFlowNode[], nextEdges: ProcessFlowEdge[]) => {
     setPast((items) => [...items.slice(-20), { nodes, edges }]);
@@ -220,6 +233,8 @@ export function FlowEditor({
   useEffect(() => {
     const loadedParts = loadPartsFromStorage();
     const loadedProjects = loadProjectsFromStorage();
+    setCatalogHolders(loadFlowHolders());
+    setCatalogTools(loadFlowTools());
     const visibleProjects = getVisibleProjects(loadedProjects, projectsView);
     const nextPart = loadedParts.find((item) => item.id === partId) ?? initialPart;
     const nextProject = loadedProjects.find((item) => item.id === (projectId ?? selectedProjectId ?? nextPart?.projectId)) ?? initialProject;
@@ -287,6 +302,13 @@ export function FlowEditor({
   }, []);
 
   useEffect(() => {
+    const savedWidth = Number.parseInt(window.localStorage.getItem(PROPERTIES_PANEL_WIDTH_KEY) ?? "", 10);
+    if (Number.isFinite(savedWidth)) {
+      setPropertiesPanelWidth(clampNumber(savedWidth, MIN_PROPERTIES_PANEL_WIDTH, MAX_PROPERTIES_PANEL_WIDTH));
+    }
+  }, []);
+
+  useEffect(() => {
     const canvas = flowCanvasRef.current;
     if (!canvas) return;
 
@@ -314,6 +336,12 @@ export function FlowEditor({
   useEffect(() => {
     function addChild(event: Event) {
       const id = (event as CustomEvent<string>).detail;
+      const visualNode = withToolPositionGroups(nodes, edges).nodes.find((node) => node.id === id);
+      if (visualNode?.data.blockType === "tool_position_group") {
+        const group = visualNode.data.entity as CollapsedGroupEntity;
+        addPositionToSetup(group.parentId);
+        return;
+      }
       setSelectedNodeId(id);
       setSelectedNodeIds([id]);
       setSelectedEdgeIds([]);
@@ -420,6 +448,18 @@ export function FlowEditor({
       return;
     }
 
+    if (blockType === "tool_position" && parentNode?.data.blockType === "setup") {
+      const groupId = toolPositionGroupNodeId(parentNode.id);
+      const existingGroup = nodes.find((node) => node.id === groupId);
+      if (existingGroup) {
+        selectFlowNode(existingGroup.id);
+        return;
+      }
+
+      createToolPositionGroupForSetup(parentNode);
+      return;
+    }
+
     const position = parentNode
       ? getNextChildPosition(parentNode, outgoing(nodes, edges, parentNode.id, blockType), nodes)
       : blockType === "project"
@@ -446,6 +486,39 @@ export function FlowEditor({
     commit(layoutAfterStructuralChange(committedNodes, nextEdges, mode, selectedProjectId), nextEdges);
     setSelectedNodeId(node.id);
     setSelectedNodeIds([node.id]);
+    setSelectedEdgeIds([]);
+  }
+
+  function addPositionToSetup(setupNodeId: string) {
+    const setupNode = nodes.find((node) => node.id === setupNodeId && node.data.blockType === "setup");
+    if (!setupNode) return;
+
+    const entity = { ...emptyToolPosition(nextChildNumber(nodes, edges, setupNode, "tool_position", (node) => (node.data.entity as ToolPosition).positionNo)), setupId: (setupNode.data.entity as OperationSetup).id };
+    const node = createFlowNode("tool_position", getNextChildPosition(setupNode, outgoing(nodes, edges, setupNode.id, "tool_position"), nodes), { entity });
+    const nextEdges = [...edges, createFlowEdge(setupNode.id, node.id)];
+    const nextNodes = [...nodes, { ...node, hidden: true }];
+    commit(layoutAfterStructuralChange(nextNodes, nextEdges, mode, selectedProjectId), nextEdges);
+    const groupId = toolPositionGroupNodeId(setupNode.id);
+    setSelectedNodeId(groupId);
+    setSelectedNodeIds([groupId]);
+    setSelectedEdgeIds([]);
+  }
+
+  function createToolPositionGroupForSetup(setupNode: ProcessFlowNode) {
+    const groupId = toolPositionGroupNodeId(setupNode.id);
+    const existingGroup = nodes.find((node) => node.id === groupId);
+    if (existingGroup) {
+      selectFlowNode(existingGroup.id);
+      return;
+    }
+
+    const groupEntity = createToolPositionGroupEntity(setupNode, []);
+    const groupNode = createToolPositionGroupNode(setupNode, groupEntity);
+    const nextEdges = [...edges, createFlowEdge(setupNode.id, groupNode.id, `edge-${setupNode.id}-${groupNode.id}`)];
+    const nextNodes = [...nodes, groupNode];
+    commit(layoutAfterStructuralChange(nextNodes, nextEdges, mode, selectedProjectId), nextEdges);
+    setSelectedNodeId(groupNode.id);
+    setSelectedNodeIds([groupNode.id]);
     setSelectedEdgeIds([]);
   }
 
@@ -658,21 +731,88 @@ export function FlowEditor({
 
   function updateSelectedEntity(patch: Record<string, unknown>) {
     if (!selectedNode) return;
+    updateNodeEntity(selectedNode.id, patch);
+  }
+
+  function updateNodeEntity(nodeId: string, patch: Record<string, unknown>) {
+    const targetNode = nodes.find((node) => node.id === nodeId);
+    if (!targetNode) return;
+
     let nextNodes = nodes.map((node) => {
-      if (node.id !== selectedNode.id) return node;
+      if (node.id !== nodeId) return node;
       const entity = { ...node.data.entity, ...patch } as FlowEntity;
       return refreshNode({ ...node, data: { ...node.data, entity } });
     });
-    if (selectedNode.data.blockType === "part" || selectedNode.data.blockType === "project") {
+    if (targetNode.data.blockType === "part" || targetNode.data.blockType === "project") {
       persistFlowEntities(nextNodes);
-      if (selectedNode.data.blockType === "part") {
+      if (targetNode.data.blockType === "part") {
         setProjectParts(getActiveProjectParts(loadPartsFromStorage(), project?.id));
       }
     }
-    if (mode === "projects" && selectedNode.data.blockType === "project" && "priority" in patch) {
+    if (mode === "projects" && targetNode.data.blockType === "project" && "priority" in patch) {
       nextNodes = reorderProjectRootsByPriority(nextNodes, edges);
     }
     commit(nextNodes, edges);
+  }
+
+  function selectFlowNode(nodeId: string) {
+    setSelectedNodeId(nodeId);
+    setSelectedNodeIds([nodeId]);
+    setSelectedEdgeIds([]);
+  }
+
+  function duplicateToolPosition(positionNodeId: string) {
+    const positionNode = nodes.find((node) => node.id === positionNodeId && node.data.blockType === "tool_position");
+    const setupNode = positionNode ? findParentNode(nodes, edges, positionNode.id, "setup") : undefined;
+    if (!positionNode || !setupNode) return;
+
+    const position = positionNode.data.entity as ToolPosition;
+    const positionNo = nextChildNumber(nodes, edges, setupNode, "tool_position", (node) => (node.data.entity as ToolPosition).positionNo);
+    const entity: ToolPosition = {
+      ...position,
+      id: createId("position"),
+      positionNo,
+      cellSource: "required",
+      cellId: undefined,
+      cellManualText: "",
+    };
+    const node = createFlowNode("tool_position", getNextChildPosition(setupNode, outgoing(nodes, edges, setupNode.id, "tool_position"), nodes), { entity });
+    const nextEdges = [...edges, createFlowEdge(setupNode.id, node.id)];
+    const nextNodes = [...nodes, { ...node, hidden: true }];
+    commit(layoutAfterStructuralChange(nextNodes, nextEdges, mode, selectedProjectId), nextEdges);
+    selectFlowNode(toolPositionGroupNodeId(setupNode.id));
+  }
+
+  function createHolderFromName(name: string) {
+    const date = new Date().toLocaleDateString("ru-RU");
+    const holder: Holder = {
+      id: createId("holder"),
+      code: `H-${Date.now()}`,
+      name,
+      type: "Оправка инструмента",
+      status: "В справочнике",
+    };
+    const nextHolders = [...catalogHolders, holder];
+    saveFlowHolders(nextHolders);
+    setCatalogHolders(nextHolders);
+    setMessage(`Оправка создана: ${name}`);
+    void date;
+    return holder;
+  }
+
+  function createToolFromName(name: string) {
+    const tool: Tool = {
+      id: createId("tool"),
+      code: `T-${Date.now()}`,
+      name,
+      type: "Инструмент",
+      status: "В справочнике",
+    };
+    const nextTools = [...catalogTools, tool];
+    saveFlowTools(nextTools);
+    setCatalogTools(nextTools);
+    setMessage(`Инструмент создан: ${name}`);
+    return tool;
   }
 
   function archiveSelectedProject() {
@@ -796,6 +936,38 @@ export function FlowEditor({
     window.setTimeout(() => {
       suppressSelectionRef.current = false;
     }, 0);
+  }
+
+  function startPropertiesPanelResize(event: MouseEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    resizingPropertiesPanelRef.current = true;
+    const startX = event.clientX;
+    const startWidth = propertiesPanelWidth;
+    let latestWidth = startWidth;
+
+    function handleMouseMove(moveEvent: globalThis.MouseEvent) {
+      if (!resizingPropertiesPanelRef.current) return;
+
+      const viewportMaxWidth = Math.max(MIN_PROPERTIES_PANEL_WIDTH, Math.min(MAX_PROPERTIES_PANEL_WIDTH, window.innerWidth - 96));
+      latestWidth = clampNumber(startWidth + startX - moveEvent.clientX, MIN_PROPERTIES_PANEL_WIDTH, viewportMaxWidth);
+      setPropertiesPanelWidth(latestWidth);
+    }
+
+    function handleMouseUp() {
+      resizingPropertiesPanelRef.current = false;
+      window.localStorage.setItem(PROPERTIES_PANEL_WIDTH_KEY, String(Math.round(latestWidth)));
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    }
+
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
   }
 
   function toggleFullscreen() {
@@ -942,7 +1114,21 @@ export function FlowEditor({
         </section>
 
         {selectedNode ? (
-          <div className="absolute inset-y-0 right-0 z-10 w-full max-w-md border-l border-slate-200 bg-white shadow-xl">
+          <div
+            className="absolute inset-y-0 right-0 z-10 border-l border-slate-200 bg-white shadow-xl"
+            style={{
+              width: `${propertiesPanelWidth}px`,
+              maxWidth: "calc(100vw - 96px)",
+            }}
+          >
+            <button
+              type="button"
+              aria-label="Изменить ширину панели свойств"
+              className="group absolute inset-y-0 left-0 z-20 w-3 -translate-x-1.5 cursor-col-resize bg-transparent transition hover:bg-blue-500/10"
+              onMouseDown={startPropertiesPanelResize}
+            >
+              <span className="absolute left-1/2 top-1/2 h-14 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-slate-300 transition group-hover:bg-blue-400" />
+            </button>
             <PropertiesPanel
               node={selectedNode}
               project={project}
@@ -954,6 +1140,18 @@ export function FlowEditor({
               onRestoreProject={restoreSelectedProject}
               isArchiveView={projectsView === "archive"}
               onClose={closePropertiesPanel}
+              nodes={nodes}
+              edges={edges}
+              holdersCatalog={catalogHolders}
+              toolsCatalog={catalogTools}
+              cellsCatalog={machineCells}
+              onSelectNode={selectFlowNode}
+              onPatchNode={updateNodeEntity}
+              onAddPosition={addPositionToSetup}
+              onDuplicatePosition={duplicateToolPosition}
+              onDeletePosition={(positionNodeId) => deleteBlock(positionNodeId)}
+              onCreateHolder={createHolderFromName}
+              onCreateTool={createToolFromName}
             />
           </div>
         ) : null}
@@ -971,6 +1169,10 @@ export function FlowEditor({
       </div>
     </div>
   );
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
 }
 
 function ConfirmDialog({
@@ -1017,15 +1219,17 @@ function FlowBlockNode({ id, data, selected }: NodeProps<ProcessFlowNode>) {
   const statusLabel = typeof entity.status === "string" ? entity.status : "";
   const addTooltip = addTooltipByType(data.blockType, groupConfig);
 
+  const compactPosition = data.blockType === "tool_position";
+
   return (
-    <div className={`relative h-[120px] w-[260px] overflow-visible rounded-lg border bg-white p-3 pr-11 shadow-sm ${isArchivedProject ? "opacity-90" : ""} ${selected ? "border-blue-500 ring-2 ring-blue-100" : "border-slate-200"}`}>
+    <div className={`relative w-[260px] overflow-visible rounded-lg border bg-white p-3 pr-11 shadow-sm ${compactPosition ? "h-[72px]" : "h-[120px]"} ${isArchivedProject ? "opacity-90" : ""} ${selected ? "border-blue-500 ring-2 ring-blue-100" : "border-slate-200"}`}>
       <Handle type="target" position={Position.Left} className="!bg-blue-500" />
       <div className="flex h-full min-w-0 flex-col">
         <div className="flex h-5 items-center gap-2">
           <div className="text-[11px] font-semibold uppercase tracking-wide text-blue-700">{flowTypeLabels[data.blockType]}</div>
           {archiveLabel ? <div className="inline-flex rounded bg-slate-200 px-2 py-0.5 text-[10px] font-bold text-slate-600">{archiveLabel}</div> : null}
         </div>
-        <div className="mt-1 line-clamp-2 min-h-9 text-sm font-semibold leading-snug text-slate-950">{data.title}</div>
+        <div className={`mt-1 line-clamp-2 text-sm font-semibold leading-snug text-slate-950 ${compactPosition ? "min-h-0" : "min-h-9"}`}>{data.title}</div>
         {data.subtitle ? <div className="mt-1 max-w-44 truncate text-xs text-slate-500">{data.subtitle}</div> : null}
         {data.blockType === "project" ? <div className="mt-auto pb-5 text-xs font-semibold text-slate-500">Деталей: {entity.partCount ?? 0}</div> : null}
       </div>
@@ -1050,7 +1254,7 @@ function FlowBlockNode({ id, data, selected }: NodeProps<ProcessFlowNode>) {
           {groupConfigByType[data.canCollapseGroup].collapseLabel}
         </button>
       ) : null}
-      {groupConfig ? (
+      {groupConfig && data.blockType !== "tool_position_group" ? (
         <button
           type="button"
           onClick={(event) => dispatchNodeEvent(event, "tech-flow:expand-group", id)}
@@ -1119,6 +1323,7 @@ function addTooltipByType(blockType: FlowBlockType, groupConfig?: NonNullable<(t
 const processNodeTypes = { processBlock: FlowBlockNode };
 
 function dispatchNodeEvent(event: MouseEvent, name: string, id: string) {
+  event.preventDefault();
   event.stopPropagation();
   window.dispatchEvent(new CustomEvent(name, { detail: id }));
 }
@@ -1150,6 +1355,18 @@ function PropertiesPanel({
   onRestoreProject,
   isArchiveView,
   onClose,
+  nodes,
+  edges,
+  holdersCatalog,
+  toolsCatalog,
+  cellsCatalog,
+  onSelectNode,
+  onPatchNode,
+  onAddPosition,
+  onDuplicatePosition,
+  onDeletePosition,
+  onCreateHolder,
+  onCreateTool,
 }: {
   node?: ProcessFlowNode;
   project?: ProcessProject;
@@ -1161,6 +1378,18 @@ function PropertiesPanel({
   onRestoreProject?: () => void;
   isArchiveView?: boolean;
   onClose: () => void;
+  nodes: ProcessFlowNode[];
+  edges: ProcessFlowEdge[];
+  holdersCatalog: Holder[];
+  toolsCatalog: Tool[];
+  cellsCatalog: MachineCell[];
+  onSelectNode: (nodeId: string) => void;
+  onPatchNode: (nodeId: string, patch: Record<string, unknown>) => void;
+  onAddPosition: (setupNodeId: string) => void;
+  onDuplicatePosition: (positionNodeId: string) => void;
+  onDeletePosition: (positionNodeId: string) => void;
+  onCreateHolder: (name: string) => Holder;
+  onCreateTool: (name: string) => Tool;
 }) {
   if (!node) {
     return null;
@@ -1188,6 +1417,24 @@ function PropertiesPanel({
           {Object.entries(flowTypeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
         </select>
       </Field>
+
+      {node.data.blockType === "tool_position_group" ? (
+        <ToolPositionQuickPanel
+          node={node}
+          nodes={nodes}
+          edges={edges}
+          holdersCatalog={holdersCatalog}
+          toolsCatalog={toolsCatalog}
+          cellsCatalog={cellsCatalog}
+          onSelectNode={onSelectNode}
+          onPatchNode={onPatchNode}
+          onAddPosition={onAddPosition}
+          onDuplicatePosition={onDuplicatePosition}
+          onDeletePosition={onDeletePosition}
+          onCreateHolder={onCreateHolder}
+          onCreateTool={onCreateTool}
+        />
+      ) : null}
 
       {node.data.blockType === "project" ? (
         <>
@@ -1257,17 +1504,7 @@ function PropertiesPanel({
         </>
       ) : null}
 
-      {node.data.blockType === "tool_position" ? (
-        <>
-          <TextField label="№ позиции" value={String(entity.positionNo ?? "")} onChange={(value) => onChange({ positionNo: Number.parseInt(value, 10) || 1 })} />
-          <ResourceFields label="Ячейка станка" source={entity.cellSource} catalogId={entity.cellId} manualText={entity.cellManualText} options={machineCells.map((cell) => ({ id: cell.id, label: cell.label }))} onChange={onChange} sourceKey="cellSource" catalogKey="cellId" manualKey="cellManualText" />
-          <ResourceFields label="Оправка инструмента" source={entity.holderSource} catalogId={entity.holderId} manualText={entity.holderManualText} options={holders.map((holder) => ({ id: holder.id, label: holder.name }))} onChange={onChange} sourceKey="holderSource" catalogKey="holderId" manualKey="holderManualText" />
-          <ResourceFields label="Инструмент" source={entity.toolSource} catalogId={entity.toolId} manualText={entity.toolManualText} options={tools.map((tool) => ({ id: tool.id, label: tool.name }))} onChange={onChange} sourceKey="toolSource" catalogKey="toolId" manualKey="toolManualText" />
-          <TextField label="Количество" value={String(entity.quantity ?? 1)} onChange={(value) => onChange({ quantity: Number.parseInt(value, 10) || 1 })} />
-          <TextareaField label="Комментарий" value={entity.comment} onChange={(value) => onChange({ comment: value })} />
-          <StatusField value={entity.status} onChange={(value) => onChange({ status: value })} />
-        </>
-      ) : null}
+      {node.data.blockType === "tool_position" ? null : null}
 
       {node.data.blockType === "unknown" ? (
         <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
@@ -1289,6 +1526,315 @@ function PropertiesPanel({
         </div>
       ) : null}
     </aside>
+  );
+}
+
+function ToolPositionQuickPanel({
+  node,
+  nodes,
+  edges,
+  holdersCatalog,
+  toolsCatalog,
+  cellsCatalog,
+  onSelectNode,
+  onPatchNode,
+  onAddPosition,
+  onDuplicatePosition,
+  onDeletePosition,
+  onCreateHolder,
+  onCreateTool,
+}: {
+  node: ProcessFlowNode;
+  nodes: ProcessFlowNode[];
+  edges: ProcessFlowEdge[];
+  holdersCatalog: Holder[];
+  toolsCatalog: Tool[];
+  cellsCatalog: MachineCell[];
+  onSelectNode: (nodeId: string) => void;
+  onPatchNode: (nodeId: string, patch: Record<string, unknown>) => void;
+  onAddPosition: (setupNodeId: string) => void;
+  onDuplicatePosition: (positionNodeId: string) => void;
+  onDeletePosition: (positionNodeId: string) => void;
+  onCreateHolder: (name: string) => Holder;
+  onCreateTool: (name: string) => Tool;
+}) {
+  const setupNode = resolveSetupForPositionPanel(node, nodes, edges);
+  const positions = setupNode ? outgoing(nodes, edges, setupNode.id, "tool_position").sort(compareFlowNodes) : [];
+  const [selectedPositionId, setSelectedPositionId] = useState<string | null>(positions[0]?.id ?? null);
+  const selectedPositionNode = positions.find((position) => position.id === selectedPositionId) ?? positions[0];
+  const operationNode = setupNode ? findParentNode(nodes, edges, setupNode.id, "operation") : undefined;
+  const operation = operationNode?.data.entity as ProcessOperation | undefined;
+  const cellOptions = operation?.machineSource === "catalog" && operation.machineId
+    ? cellsCatalog.filter((cell) => cell.machineId === operation.machineId)
+    : [];
+
+  if (!setupNode) return null;
+  const setup = setupNode.data.entity as OperationSetup;
+
+  return (
+    <div className="space-y-4 rounded-lg border border-slate-200 bg-slate-50 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <div className="text-sm font-semibold text-slate-950">Инструментальные позиции</div>
+          <div className="text-xs text-slate-500">Установ: {setup.name} · Позиций: {positions.length}</div>
+        </div>
+        <button type="button" onClick={() => onAddPosition(setupNode.id)} className="rounded-md bg-blue-600 px-2 py-1 text-xs font-semibold text-white">+ Добавить</button>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        <button type="button" disabled={!selectedPositionNode} onClick={() => selectedPositionNode && onDuplicatePosition(selectedPositionNode.id)} className="rounded-md border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 disabled:opacity-40">Дублировать выбранную</button>
+        <button type="button" disabled={!selectedPositionNode} onClick={() => selectedPositionNode && onDeletePosition(selectedPositionNode.id)} className="rounded-md border border-rose-200 px-2 py-1 text-xs font-semibold text-rose-700 disabled:opacity-40">Удалить выбранную</button>
+      </div>
+
+      {positions.length ? (
+        <div className="max-h-[58vh] overflow-auto rounded-md border border-slate-200 bg-white">
+          <table className="min-w-[1180px] text-left text-xs">
+            <thead className="sticky top-0 z-10 bg-slate-50 text-slate-600">
+              <tr>
+                {["№", "Ячейка станка", "Основная оправка / блок", "Доп. оснастка", "Тип инструмента", "Инструмент / державка", "Пластина", "Кол-во", "Статус", "Комментарий"].map((header) => (
+                  <th key={header} className="border-b border-slate-200 px-2 py-2 font-semibold">{header}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {positions.map((positionNode) => {
+                const position = positionNode.data.entity as ToolPosition & Record<string, any>;
+                const active = selectedPositionNode?.id === positionNode.id;
+                const toolKind = (position.toolKind ?? (position.indexableHolderId || position.insertId ? "indexable" : "solid")) as "solid" | "indexable" | "other";
+                const conflict = cellConflictLabel(nodes, edges, positionNode, holdersCatalog, toolsCatalog);
+                return (
+                  <tr key={positionNode.id} onClick={() => setSelectedPositionId(positionNode.id)} className={active ? "bg-blue-50" : ""}>
+                    <td className="w-16 border-b border-slate-100 p-2 align-top">
+                      <input value={String(position.positionNo ?? "")} onChange={(event) => onPatchNode(positionNode.id, { positionNo: Number.parseInt(event.target.value, 10) || 1 })} className="field px-2 py-1 text-xs" />
+                    </td>
+                    <td className="w-40 border-b border-slate-100 p-2 align-top">
+                      <NomenclatureCombobox label="" value={position.machineCellId ?? position.cellId} options={cellOptions} placeholder={operation?.machineId ? "Ячейка" : "Сначала станок"} getOptionLabel={(cell) => cell.label} allowCreate={false} disabled={!operation?.machineId} onSelectExisting={(cell) => onPatchNode(positionNode.id, { machineCellId: cell.id, machineCellName: cell.label, cellSource: "catalog", cellId: cell.id, cellManualText: "" })} onClear={() => onPatchNode(positionNode.id, { machineCellId: undefined, machineCellName: "", cellSource: "required", cellId: undefined, cellManualText: "" })} />
+                      {conflict ? <div className="mt-1 rounded bg-amber-50 px-2 py-1 text-[10px] font-semibold text-amber-800" title={conflict}>Ячейка занята</div> : null}
+                    </td>
+                    <td className="w-48 border-b border-slate-100 p-2 align-top">
+                      <NomenclatureCombobox label="" value={position.mainHolderId ?? position.holderId} options={holdersCatalog} placeholder="Оправка / блок" createLabel="Создать" getOptionLabel={(holder) => holder.name} onSelectExisting={(holder) => onPatchNode(positionNode.id, { mainHolderId: holder.id, mainHolderName: holder.name, holderSource: "catalog", holderId: holder.id, holderManualText: "" })} onCreateNew={(name) => { const holder = onCreateHolder(name); onPatchNode(positionNode.id, { mainHolderId: holder.id, mainHolderName: holder.name, holderSource: "catalog", holderId: holder.id, holderManualText: "" }); }} onClear={() => onPatchNode(positionNode.id, { mainHolderId: undefined, mainHolderName: "", holderSource: "required", holderId: undefined, holderManualText: "" })} />
+                    </td>
+                    <td className="w-44 border-b border-slate-100 p-2 align-top">
+                      <input value={position.auxiliaryText ?? ""} onChange={(event) => onPatchNode(positionNode.id, { auxiliaryText: event.target.value, auxiliaryItems: event.target.value ? [{ id: "aux-text", type: "other", name: event.target.value, quantity: 1, comment: "" }] : [] })} className="field px-2 py-1 text-xs" placeholder="—" />
+                    </td>
+                    <td className="w-36 border-b border-slate-100 p-2 align-top">
+                      <select value={toolKind} onChange={(event) => onPatchNode(positionNode.id, { toolKind: event.target.value })} className="field px-2 py-1 text-xs">
+                        <option value="solid">Монолитный</option>
+                        <option value="indexable">СМП</option>
+                        <option value="other">Прочее</option>
+                      </select>
+                    </td>
+                    <td className="w-52 border-b border-slate-100 p-2 align-top">
+                      {toolKind === "indexable" ? (
+                        <NomenclatureCombobox label="" value={position.indexableHolderId} options={toolsCatalog} placeholder="Державка / корпус" createLabel="Создать" getOptionLabel={(tool) => tool.name} onSelectExisting={(tool) => onPatchNode(positionNode.id, { indexableHolderId: tool.id, indexableHolderName: tool.name, toolId: undefined, solidToolId: undefined })} onCreateNew={(name) => { const tool = onCreateTool(name); onPatchNode(positionNode.id, { indexableHolderId: tool.id, indexableHolderName: tool.name, toolId: undefined, solidToolId: undefined }); }} onClear={() => onPatchNode(positionNode.id, { indexableHolderId: undefined, indexableHolderName: "" })} />
+                      ) : toolKind === "solid" ? (
+                        <NomenclatureCombobox label="" value={position.solidToolId ?? position.toolId} options={toolsCatalog} placeholder="Инструмент" createLabel="Создать" getOptionLabel={(tool) => tool.name} onSelectExisting={(tool) => onPatchNode(positionNode.id, { solidToolId: tool.id, solidToolName: tool.name, toolSource: "catalog", toolId: tool.id, toolManualText: "", indexableHolderId: undefined })} onCreateNew={(name) => { const tool = onCreateTool(name); onPatchNode(positionNode.id, { solidToolId: tool.id, solidToolName: tool.name, toolSource: "catalog", toolId: tool.id, toolManualText: "", indexableHolderId: undefined }); }} onClear={() => onPatchNode(positionNode.id, { solidToolId: undefined, solidToolName: "", toolSource: "required", toolId: undefined, toolManualText: "" })} />
+                      ) : <span className="text-slate-500">—</span>}
+                    </td>
+                    <td className="w-44 border-b border-slate-100 p-2 align-top">
+                      {toolKind === "indexable" ? (
+                        <NomenclatureCombobox label="" value={position.insertId} options={toolsCatalog} placeholder="Пластина" createLabel="Создать" getOptionLabel={(tool) => tool.name} onSelectExisting={(tool) => onPatchNode(positionNode.id, { insertId: tool.id, insertName: tool.name })} onCreateNew={(name) => { const tool = onCreateTool(name); onPatchNode(positionNode.id, { insertId: tool.id, insertName: tool.name }); }} onClear={() => onPatchNode(positionNode.id, { insertId: undefined, insertName: "" })} />
+                      ) : <span className="text-slate-500">—</span>}
+                    </td>
+                    <td className="w-20 border-b border-slate-100 p-2 align-top">
+                      <input value={String(position.quantity ?? 1)} onChange={(event) => onPatchNode(positionNode.id, { quantity: Number.parseInt(event.target.value, 10) || 1 })} className="field px-2 py-1 text-xs" />
+                    </td>
+                    <td className="w-36 border-b border-slate-100 p-2 align-top">
+                      <select value={position.status} onChange={(event) => onPatchNode(positionNode.id, { status: event.target.value as OperationStatus })} className="field px-2 py-1 text-xs">
+                        {statusOptions.map((status) => <option key={status} value={status}>{status}</option>)}
+                      </select>
+                    </td>
+                    <td className="w-48 border-b border-slate-100 p-2 align-top">
+                      <input value={position.comment ?? ""} onChange={(event) => onPatchNode(positionNode.id, { comment: event.target.value })} className="field px-2 py-1 text-xs" placeholder="—" />
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="rounded-md border border-dashed border-slate-300 px-3 py-6 text-center text-xs text-slate-500">Позиции пока не созданы</div>
+      )}
+      {selectedPositionNode ? <div className="text-[11px] text-slate-500">Выбрана позиция {(selectedPositionNode.data.entity as ToolPosition).positionNo}. TODO: В будущем сделать зависимые меню для совместимых оправок, доп. оснастки, инструмента и пластин.</div> : null}
+    </div>
+  );
+}
+
+function ToolPositionEditor({
+  positionNode,
+  holdersCatalog,
+  toolsCatalog,
+  cellOptions,
+  cellConflict,
+  hasMachine,
+  onPatch,
+  onDuplicate,
+  onDelete,
+  onCreateHolder,
+  onCreateTool,
+}: {
+  positionNode: ProcessFlowNode;
+  holdersCatalog: Holder[];
+  toolsCatalog: Tool[];
+  cellOptions: MachineCell[];
+  cellConflict: string;
+  hasMachine: boolean;
+  onPatch: (patch: Record<string, unknown>) => void;
+  onDuplicate: () => void;
+  onDelete: () => void;
+  onCreateHolder: (name: string) => Holder;
+  onCreateTool: (name: string) => Tool;
+}) {
+  const position = positionNode.data.entity as ToolPosition;
+
+  return (
+    <div className="space-y-3">
+      <TextField label="№ позиции" value={String(position.positionNo ?? "")} onChange={(value) => onPatch({ positionNo: Number.parseInt(value, 10) || 1 })} />
+      <NomenclatureCombobox
+        label="Ячейка станка"
+        value={position.cellId}
+        options={cellOptions}
+        placeholder={hasMachine ? "Выберите ячейку" : "Сначала выберите станок операции"}
+        getOptionLabel={(cell) => cell.label}
+        allowCreate={false}
+        disabled={!hasMachine}
+        onSelectExisting={(cell) => onPatch({ cellSource: "catalog", cellId: cell.id, cellManualText: "" })}
+        onClear={() => onPatch({ cellSource: "required", cellId: undefined, cellManualText: "" })}
+      />
+      {cellConflict ? <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">{cellConflict}</div> : null}
+      <NomenclatureCombobox
+        label="Оправка инструмента"
+        value={position.holderId}
+        options={holdersCatalog}
+        placeholder="Найти или создать оправку"
+        createLabel="Создать оправку"
+        getOptionLabel={(holder) => holder.name}
+        onSelectExisting={(holder) => onPatch({ holderSource: "catalog", holderId: holder.id, holderManualText: "" })}
+        onCreateNew={(name) => {
+          const holder = onCreateHolder(name);
+          onPatch({ holderSource: "catalog", holderId: holder.id, holderManualText: "" });
+        }}
+        onClear={() => onPatch({ holderSource: "required", holderId: undefined, holderManualText: "" })}
+      />
+      <NomenclatureCombobox
+        label="Инструмент"
+        value={position.toolId}
+        options={toolsCatalog}
+        placeholder="Найти или создать инструмент"
+        createLabel="Создать инструмент"
+        getOptionLabel={(tool) => tool.name}
+        onSelectExisting={(tool) => onPatch({ toolSource: "catalog", toolId: tool.id, toolManualText: "" })}
+        onCreateNew={(name) => {
+          const tool = onCreateTool(name);
+          onPatch({ toolSource: "catalog", toolId: tool.id, toolManualText: "" });
+        }}
+        onClear={() => onPatch({ toolSource: "required", toolId: undefined, toolManualText: "" })}
+      />
+      <TextField label="Количество" value={String(position.quantity ?? 1)} onChange={(value) => onPatch({ quantity: Number.parseInt(value, 10) || 1 })} />
+      <StatusField value={position.status} onChange={(value) => onPatch({ status: value })} />
+      <TextareaField label="Комментарий" value={position.comment} onChange={(value) => onPatch({ comment: value })} />
+      <div className="flex flex-wrap gap-2">
+        <button type="button" onClick={onDuplicate} className="rounded-md border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700">Дублировать</button>
+        <button type="button" onClick={onDelete} className="rounded-md border border-rose-200 px-3 py-1.5 text-xs font-semibold text-rose-700">Удалить</button>
+      </div>
+      <div className="text-[11px] text-slate-500">
+        TODO: В будущем добавить правила подбора по типу оправки, совместимости инструмента и предупреждениям.
+      </div>
+    </div>
+  );
+}
+
+function NomenclatureCombobox<T extends { id: string }>({
+  label,
+  value,
+  options,
+  placeholder,
+  onSelectExisting,
+  onCreateNew,
+  onClear,
+  getOptionLabel,
+  allowCreate = true,
+  createLabel = "Создать",
+  disabled = false,
+}: {
+  label: string;
+  value?: string;
+  options: T[];
+  placeholder: string;
+  onSelectExisting: (option: T) => void;
+  onCreateNew?: (text: string) => void;
+  onClear: () => void;
+  getOptionLabel: (option: T) => string;
+  allowCreate?: boolean;
+  createLabel?: string;
+  disabled?: boolean;
+}) {
+  const selected = options.find((option) => option.id === value);
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+  const normalizedQuery = query.trim().toLowerCase();
+  const filtered = normalizedQuery
+    ? options.filter((option) => getOptionLabel(option).toLowerCase().includes(normalizedQuery)).slice(0, 8)
+    : options.slice(0, 8);
+  const hasExact = options.some((option) => getOptionLabel(option).trim().toLowerCase() === normalizedQuery);
+  const canCreate = allowCreate && Boolean(normalizedQuery) && !hasExact && onCreateNew;
+
+  return (
+    <div className="relative space-y-1">
+      <div className="flex items-center justify-between gap-2">
+        <label className="text-sm font-semibold text-slate-700">{label}</label>
+        {value ? <button type="button" onClick={() => { onClear(); setQuery(""); }} className="text-xs font-semibold text-slate-500 hover:text-rose-600">Очистить</button> : null}
+      </div>
+      <input
+        value={open ? query : selected ? getOptionLabel(selected) : ""}
+        onFocus={() => {
+          setOpen(true);
+          setQuery(selected ? getOptionLabel(selected) : "");
+        }}
+        onChange={(event) => {
+          setQuery(event.target.value);
+          setOpen(true);
+        }}
+        disabled={disabled}
+        className="field"
+        placeholder={placeholder}
+      />
+      {open && !disabled ? (
+        <div className="absolute z-30 mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-slate-200 bg-white p-1 shadow-xl">
+          {filtered.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              onMouseDown={(event) => {
+                event.preventDefault();
+                onSelectExisting(option);
+                setQuery(getOptionLabel(option));
+                setOpen(false);
+              }}
+              className="w-full rounded px-2 py-1.5 text-left text-sm text-slate-700 hover:bg-blue-50 hover:text-blue-700"
+            >
+              {getOptionLabel(option)}
+            </button>
+          ))}
+          {canCreate ? (
+            <button
+              type="button"
+              onMouseDown={(event) => {
+                event.preventDefault();
+                onCreateNew?.(query.trim());
+                setQuery(query.trim());
+                setOpen(false);
+              }}
+              className="w-full rounded px-2 py-1.5 text-left text-sm font-semibold text-blue-700 hover:bg-blue-50"
+            >
+              + {createLabel}: {query.trim()}
+            </button>
+          ) : null}
+          {!filtered.length && !canCreate ? <div className="px-2 py-2 text-sm text-slate-500">Ничего не найдено</div> : null}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -1527,6 +2073,32 @@ function syncProjectFlow(snapshot: FlowSnapshot, project: ProcessProject, projec
       if (!edges.some((edge) => edge.source === partNodeId && edge.target === operationNodeId)) {
         edges.push(createFlowEdge(partNodeId, operationNodeId, `edge-${part.id}-${operation.id}`));
       }
+
+      operation.setups.forEach((setup) => {
+        const setupNodeId = `setup-${setup.id}`;
+        if (nodes.some((node) => node.id === setupNodeId)) {
+          nodes = nodes.map((node) => node.id === setupNodeId ? refreshNode({ ...node, data: { ...node.data, blockType: "setup", entity: setup } }) : node);
+        } else {
+          nodes.push(createFlowNode("setup", { x: 1120, y: 80 }, { entity: setup }));
+        }
+
+        if (!edges.some((edge) => edge.source === operationNodeId && edge.target === setupNodeId)) {
+          edges.push(createFlowEdge(operationNodeId, setupNodeId, `edge-${operation.id}-${setup.id}`));
+        }
+
+        setup.toolPositions.forEach((position) => {
+          const positionNodeId = `position-${position.id}`;
+          if (nodes.some((node) => node.id === positionNodeId)) {
+            nodes = nodes.map((node) => node.id === positionNodeId ? refreshNode({ ...node, hidden: true, data: { ...node.data, blockType: "tool_position", entity: position } }) : node);
+          } else {
+            nodes.push({ ...createFlowNode("tool_position", { x: 1480, y: 80 }, { entity: position }), hidden: true });
+          }
+
+          if (!edges.some((edge) => edge.source === setupNodeId && edge.target === positionNodeId)) {
+            edges.push(createFlowEdge(setupNodeId, positionNodeId, `edge-${setup.id}-${position.id}`));
+          }
+        });
+      });
     });
   });
 
@@ -1739,9 +2311,9 @@ function describeNode(blockType: FlowBlockType, entity: Record<string, any>) {
     return describeGroupNode(blockType, entity as CollapsedGroupEntity);
   }
   if (blockType === "tool_position") {
-    const cell = entity.cellSource === "catalog" ? cellName(entity.cellId) : entity.cellSource === "manual" ? entity.cellManualText : "Ячейка?";
-    const holder = entity.holderSource === "catalog" ? holderName(entity.holderId) : entity.holderSource === "manual" ? entity.holderManualText : "Оправка?";
-    const tool = entity.toolSource === "catalog" ? toolName(entity.toolId) : entity.toolSource === "manual" ? entity.toolManualText : "Инструмент?";
+    const cell = entity.cellSource === "catalog" ? catalogCellName(entity.cellId) : entity.cellSource === "manual" ? entity.cellManualText : "—";
+    const holder = entity.holderSource === "catalog" ? catalogHolderName(entity.holderId) : entity.holderSource === "manual" ? entity.holderManualText : "—";
+    const tool = entity.toolSource === "catalog" ? catalogToolName(entity.toolId) : entity.toolSource === "manual" ? entity.toolManualText : "—";
     return { title: `Позиция ${entity.positionNo ?? "-"}`, subtitle: `${cell} → ${holder} → ${tool}` };
   }
   return { title: "Свободный блок", subtitle: "Тип не задан" };
@@ -1789,11 +2361,21 @@ function describeGroupNode(blockType: GroupBlockType, entity: CollapsedGroupEnti
     return { title: entity.label || "Установы", subtitle: `${entity.countChildren} установа · ${countGroupedType(entity, "tool_position")} позиций` };
   }
 
-  return { title: entity.label || "Инструментальные позиции", subtitle: `${entity.countChildren} позиций · Ячейка → Оправка → Инструмент` };
+  const filledCount = (entity as CollapsedGroupEntity & { filledCount?: number }).filledCount ?? 0;
+  const conflictsCount = (entity as CollapsedGroupEntity & { conflictsCount?: number }).conflictsCount ?? 0;
+  if (!entity.countChildren) return { title: entity.label || "Инструментальные позиции", subtitle: "Позиций: 0 · нажмите +, чтобы добавить" };
+  return {
+    title: entity.label || "Инструментальные позиции",
+    subtitle: `Позиций: ${entity.countChildren} · Заполнено: ${filledCount}/${entity.countChildren}${conflictsCount ? ` · Конфликты: ${conflictsCount}` : ""}`,
+  };
 }
 
 function countGroupedType(entity: CollapsedGroupEntity, blockType: FlowBlockType) {
   return entity.groupedDescendantIds.filter((id) => id.startsWith(`${blockType === "tool_position" ? "position" : blockType}-`)).length;
+}
+
+function toolPositionGroupNodeId(setupNodeId: string) {
+  return `tool-position-group-${setupNodeId}`;
 }
 
 function compareFlowNodes(first: ProcessFlowNode, second: ProcessFlowNode) {
@@ -1856,6 +2438,14 @@ function flowLevel(blockType: FlowBlockType) {
   return 2;
 }
 
+function nodeHeight(node: ProcessFlowNode) {
+  return node.data.blockType === "tool_position" ? TOOL_POSITION_NODE_HEIGHT : NODE_HEIGHT;
+}
+
+function subtreeSpacing(node: ProcessFlowNode) {
+  return node.data.blockType === "tool_position" ? 16 : SUBTREE_SPACING;
+}
+
 function layoutFlowTree(nodes: ProcessFlowNode[], edges: ProcessFlowEdge[]) {
   const visibleNodes = nodes.filter((node) => !node.hidden);
   const visibleNodeIds = new Set(visibleNodes.map((node) => node.id));
@@ -1875,16 +2465,16 @@ function layoutFlowTree(nodes: ProcessFlowNode[], edges: ProcessFlowEdge[]) {
   const positioned = new Map<string, { x: number; y: number }>();
   const visiting = new Set<string>();
 
-  function subtreeHeight(node: ProcessFlowNode): number {
-    if (visiting.has(node.id)) return NODE_HEIGHT + SUBTREE_SPACING;
+function subtreeHeight(node: ProcessFlowNode): number {
+    if (visiting.has(node.id)) return nodeHeight(node) + subtreeSpacing(node);
     visiting.add(node.id);
     const children = (childrenBySource.get(node.id) ?? []).sort(compareFlowNodes);
     if (!children.length) {
       visiting.delete(node.id);
-      return NODE_HEIGHT + SUBTREE_SPACING;
+      return nodeHeight(node) + subtreeSpacing(node);
     }
 
-    const height = Math.max(NODE_HEIGHT + SUBTREE_SPACING, children.reduce((sum, child) => sum + subtreeHeight(child), 0));
+    const height = Math.max(nodeHeight(node) + subtreeSpacing(node), children.reduce((sum, child) => sum + subtreeHeight(child), 0));
     visiting.delete(node.id);
     return height;
   }
@@ -1978,6 +2568,89 @@ function enrichFlowEdges(edges: ProcessFlowEdge[]) {
   }));
 }
 
+function withToolPositionGroups(nodes: ProcessFlowNode[], edges: ProcessFlowEdge[]): FlowSnapshot {
+  let nextNodes = nodes.map((node) => node.data.blockType === "tool_position" ? { ...node, hidden: true } : node);
+  let nextEdges = edges.map((edge) => {
+    const target = nodes.find((node) => node.id === edge.target);
+    return target?.data.blockType === "tool_position" ? { ...edge, hidden: true } : edge;
+  });
+  const setups = nextNodes.filter((node) => node.data.blockType === "setup");
+
+  setups.forEach((setupNode) => {
+    const positions = outgoing(nodes, edges, setupNode.id, "tool_position").sort(compareFlowNodes);
+    const groupId = toolPositionGroupNodeId(setupNode.id);
+    const existingGroup = nextNodes.find((node) => node.id === groupId);
+
+    const groupEntity = createToolPositionGroupEntity(setupNode, positions, nodes, edges);
+    const groupNode = refreshNode({
+      ...(existingGroup ?? createToolPositionGroupNode(setupNode, groupEntity)),
+      hidden: false,
+      data: {
+        ...(existingGroup?.data ?? {}),
+        blockType: "tool_position_group",
+        entityType: "group",
+        entityId: groupId,
+        title: "Инструментальные позиции",
+        entity: groupEntity,
+      },
+    } as ProcessFlowNode);
+
+    nextNodes = [...nextNodes.filter((node) => node.id !== groupId), groupNode];
+    if (!nextEdges.some((edge) => edge.source === setupNode.id && edge.target === groupId)) {
+      nextEdges = [...nextEdges, createFlowEdge(setupNode.id, groupId, `edge-${setupNode.id}-${groupId}`)];
+    }
+  });
+
+  return { nodes: layoutFlowTree(nextNodes, nextEdges), edges: nextEdges };
+}
+
+function createToolPositionGroupEntity(
+  setupNode: ProcessFlowNode,
+  positions: ProcessFlowNode[],
+  nodes: ProcessFlowNode[] = [],
+  edges: ProcessFlowEdge[] = [],
+): CollapsedGroupEntity & { filledCount: number; conflictsCount: number } {
+  const filledCount = positions.filter((positionNode) => {
+    const position = positionNode.data.entity as ToolPosition & Record<string, unknown>;
+    return Boolean(position.cellId || position.holderId || position.toolId || position.mainHolderId || position.solidToolId || position.indexableHolderId || position.insertId);
+  }).length;
+  const conflictsCount = nodes.length && edges.length
+    ? positions.filter((positionNode) => cellConflictLabel(nodes, edges, positionNode, loadFlowHolders(), loadFlowTools())).length
+    : 0;
+
+  return {
+    id: toolPositionGroupNodeId(setupNode.id),
+    groupType: "tool_position_group",
+    parentId: setupNode.id,
+    childType: "tool_position",
+    groupedNodeIds: positions.map((position) => position.id),
+    groupedDescendantIds: [],
+    label: "Инструментальные позиции",
+    countChildren: positions.length,
+    countDescendants: 0,
+    isCollapsed: true,
+    filledCount,
+    conflictsCount,
+  };
+}
+
+function createToolPositionGroupNode(setupNode: ProcessFlowNode, entity: CollapsedGroupEntity & { filledCount: number; conflictsCount: number }): ProcessFlowNode {
+  return refreshNode({
+    id: entity.id,
+    type: "processBlock",
+    position: { x: setupNode.position.x + HORIZONTAL_SPACING, y: setupNode.position.y },
+    sourcePosition: Position.Right,
+    targetPosition: Position.Left,
+    data: {
+      blockType: "tool_position_group",
+      entityType: "group",
+      entityId: entity.id,
+      title: "Инструментальные позиции",
+      entity,
+    },
+  });
+}
+
 function enrichFlowNodes(nodes: ProcessFlowNode[], edges: ProcessFlowEdge[]) {
   return nodes.map((node) => {
     if (node.data.blockType === "project") {
@@ -2003,8 +2676,9 @@ function enrichFlowNodes(nodes: ProcessFlowNode[], edges: ProcessFlowEdge[]) {
 
 function getNextChildPosition(parentNode: ProcessFlowNode, existingChildren: ProcessFlowNode[], allNodes: ProcessFlowNode[]) {
   const visibleChildren = existingChildren.filter((node) => !node.hidden);
+  const spacing = parentNode.data.blockType === "setup" ? TOOL_POSITION_VERTICAL_SPACING : VERTICAL_SPACING;
   const nextY = visibleChildren.length
-    ? Math.max(...visibleChildren.map((node) => node.position.y)) + VERTICAL_SPACING
+    ? Math.max(...visibleChildren.map((node) => node.position.y)) + spacing
     : parentNode.position.y;
   const basePosition = {
     x: parentNode.position.x + HORIZONTAL_SPACING,
@@ -2280,6 +2954,102 @@ function softDeleteProjectNodes(projectNodes: ProcessFlowNode[]) {
   saveProjectsToStorage(loadProjectsFromStorage().map((project) =>
     projectIds.has(project.id) ? { ...project, isDeleted: true, deletedAt: date, updatedAt: date } : project,
   ));
+}
+
+function resolveSetupForPositionPanel(node: ProcessFlowNode, nodes: ProcessFlowNode[], edges: ProcessFlowEdge[]) {
+  if (node.data.blockType === "setup") return node;
+  if (node.data.blockType === "tool_position") return findParentNode(nodes, edges, node.id, "setup");
+  if (node.data.blockType === "tool_position_group") {
+    const group = node.data.entity as CollapsedGroupEntity;
+    return nodes.find((item) => item.id === group.parentId && item.data.blockType === "setup");
+  }
+  return undefined;
+}
+
+function findParentNode(nodes: ProcessFlowNode[], edges: ProcessFlowEdge[], nodeId: string, blockType?: FlowBlockType) {
+  const incomingEdge = edges.find((edge) => edge.target === nodeId);
+  if (!incomingEdge) return undefined;
+  const parent = nodes.find((node) => node.id === incomingEdge.source);
+  if (!parent) return undefined;
+  if (!blockType || parent.data.blockType === blockType) return parent;
+  return findParentNode(nodes, edges, parent.id, blockType);
+}
+
+function positionSummary(position: ToolPosition, holdersCatalog: Holder[], toolsCatalog: Tool[], cellsCatalog: MachineCell[]) {
+  const cell = cellsCatalog.find((item) => item.id === position.cellId)?.label ?? position.cellManualText ?? "—";
+  const holder = holdersCatalog.find((item) => item.id === position.holderId)?.name ?? position.holderManualText ?? "—";
+  const tool = toolsCatalog.find((item) => item.id === position.toolId)?.name ?? position.toolManualText ?? "—";
+  return `Позиция ${position.positionNo} | ${cell} | ${holder} | ${tool}`;
+}
+
+function cellConflictLabel(nodes: ProcessFlowNode[], edges: ProcessFlowEdge[], positionNode: ProcessFlowNode, holdersCatalog: Holder[], toolsCatalog: Tool[]) {
+  const position = positionNode.data.entity as ToolPosition;
+  if (!position.cellId) return "";
+
+  const setupNode = findParentNode(nodes, edges, positionNode.id, "setup");
+  const operationNode = setupNode ? findParentNode(nodes, edges, setupNode.id, "operation") : undefined;
+  const operation = operationNode?.data.entity as ProcessOperation | undefined;
+  if (!operation?.machineId) return "";
+
+  const conflictNode = nodes.find((node) => {
+    if (node.id === positionNode.id || node.data.blockType !== "tool_position") return false;
+    const other = node.data.entity as ToolPosition;
+    if (other.cellId !== position.cellId) return false;
+    const otherSetup = findParentNode(nodes, edges, node.id, "setup");
+    const otherOperationNode = otherSetup ? findParentNode(nodes, edges, otherSetup.id, "operation") : undefined;
+    const otherOperation = otherOperationNode?.data.entity as ProcessOperation | undefined;
+    return otherOperation?.machineId === operation.machineId;
+  });
+
+  if (!conflictNode) return "";
+
+  const conflict = conflictNode.data.entity as ToolPosition;
+  const conflictSetup = findParentNode(nodes, edges, conflictNode.id, "setup");
+  const conflictOperationNode = conflictSetup ? findParentNode(nodes, edges, conflictSetup.id, "operation") : undefined;
+  const conflictOperation = conflictOperationNode?.data.entity as ProcessOperation | undefined;
+  const tool = toolsCatalog.find((item) => item.id === conflict.toolId)?.name ?? conflict.toolManualText ?? "—";
+  const setup = conflictSetup?.data.entity as OperationSetup | undefined;
+  return `Ячейка уже занята: Операция ${conflictOperation?.operationNo ?? "—"} / Установ ${setup?.setupNo ?? "—"} / Инструмент: ${tool}`;
+}
+
+function loadFlowHolders() {
+  return mergeCatalogById(holders, readCatalogStorage<Holder>(FLOW_HOLDERS_STORAGE_KEY));
+}
+
+function saveFlowHolders(nextHolders: Holder[]) {
+  window.localStorage.setItem(FLOW_HOLDERS_STORAGE_KEY, JSON.stringify(nextHolders));
+}
+
+function loadFlowTools() {
+  return mergeCatalogById(tools, readCatalogStorage<Tool>(FLOW_TOOLS_STORAGE_KEY));
+}
+
+function saveFlowTools(nextTools: Tool[]) {
+  window.localStorage.setItem(FLOW_TOOLS_STORAGE_KEY, JSON.stringify(nextTools));
+}
+
+function readCatalogStorage<T>(key: string): T[] {
+  try {
+    return JSON.parse(window.localStorage.getItem(key) ?? "[]") as T[];
+  } catch {
+    return [];
+  }
+}
+
+function mergeCatalogById<T extends { id: string }>(base: T[], stored: T[]) {
+  return mergeById(base, stored);
+}
+
+function catalogHolderName(holderId?: string) {
+  return loadFlowHolders().find((holder) => holder.id === holderId)?.name ?? holderName(holderId) ?? "—";
+}
+
+function catalogToolName(toolId?: string) {
+  return loadFlowTools().find((tool) => tool.id === toolId)?.name ?? toolName(toolId) ?? "—";
+}
+
+function catalogCellName(cellId?: string) {
+  return machineCells.find((cell) => cell.id === cellId)?.label ?? cellName(cellId) ?? "—";
 }
 
 function outgoing(nodes: ProcessFlowNode[], edges: ProcessFlowEdge[], sourceId: string, blockType: FlowBlockType) {
